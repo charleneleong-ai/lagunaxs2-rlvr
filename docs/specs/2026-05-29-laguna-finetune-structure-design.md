@@ -71,7 +71,7 @@ laguna-finetune/
 | `report.py` | Rank `results/probe/*.jsonl` by `base_rate × variance`; wandb summary + PNG | `python -m laguna_finetune.report` → `results/probe/ranking.{md,png}` |
 | `rl.py` | Launch `prime-rl` on chosen env+reward; stream reward curve. Refuses if probe `variance == 0`. | `python -m laguna_finetune.rl env=<winner> reward=partial rl=laguna_small` |
 
-Environments are standalone `verifiers` packages with `load_environment()`; they import shaping fns from `rewards.py` but own their dataset + rubric.
+Environments are standalone `verifiers` packages; they import shaping fns from `rewards.py` but own their dataset + rubric. The entrypoint matches what `prime env init` actually generates (verified 2026-05-29 against CLI 0.6.10 / verifiers 0.1.14): `def load_environment(**kwargs) -> vf.Environment`, returning e.g. a `vf.ToolEnv(dataset=..., rubric=vf.Rubric(funcs=[shaped], weights=[1.0]), max_turns=...)`. The generated env `pyproject.toml` uses a `hatchling` build, declares `tags`, and carries `[tool.verifiers.eval]` defaults (`num_examples`, `rollouts_per_example`) that `probe.py` overrides via flags.
 
 ### Config schema
 
