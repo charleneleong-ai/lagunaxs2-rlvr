@@ -14,9 +14,9 @@ execution check (in a subprocess, like code_exec) is the corpus's correctness ba
 """
 from __future__ import annotations
 
-import subprocess
-import sys
 from dataclasses import asdict, dataclass
+
+from laguna_rlvr.code_exec import run_python
 
 _HARNESS = "import sys as _s; _s.exit(0 if verify() else 1)"
 
@@ -48,12 +48,10 @@ def run_capturing(task: Task, solution: str | None = None, timeout: float = 5.0)
     One subprocess yields both the score (verify() harness exit code) and the agent's observation
     (whatever the tool calls printed) — so a multi-turn env needn't run the program twice per turn.
     """
-    try:
-        r = subprocess.run([sys.executable, "-c", assemble_program(task, solution)],
-                           capture_output=True, text=True, timeout=timeout)
-        return r.returncode == 0, (r.stdout + r.stderr)
-    except subprocess.TimeoutExpired:
+    r = run_python(assemble_program(task, solution), timeout)
+    if r is None:
         return False, "(timed out)"
+    return r.returncode == 0, (r.stdout + r.stderr)
 
 
 def run_solution(task: Task, solution: str | None = None, timeout: float = 5.0) -> bool:

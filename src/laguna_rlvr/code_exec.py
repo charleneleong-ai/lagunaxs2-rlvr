@@ -30,15 +30,19 @@ def message_text(message) -> str:
     return ""
 
 
+def run_python(program: str, timeout: float = 5.0) -> subprocess.CompletedProcess | None:
+    """Run a Python program in an isolated subprocess; return the result, or None on timeout."""
+    try:
+        return subprocess.run([sys.executable, "-c", program],
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+
+
 def score_code(code: str, tests: list[str], timeout: float = 5.0) -> tuple[int, int]:
     """Return (passed, total): how many assert-tests the code satisfies."""
     passed = 0
     for test in tests:
-        program = f"{code}\n{test}\n"
-        try:
-            result = subprocess.run([sys.executable, "-c", program],
-                                    capture_output=True, timeout=timeout)
-            passed += result.returncode == 0
-        except subprocess.TimeoutExpired:
-            pass
+        r = run_python(f"{code}\n{test}\n", timeout)
+        passed += r is not None and r.returncode == 0
     return passed, len(tests)

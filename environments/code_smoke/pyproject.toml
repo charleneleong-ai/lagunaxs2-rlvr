@@ -14,7 +14,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-include = ["code_smoke.py", "pyproject.toml"]
+# laguna_rlvr/ is vendored in only at push time by scripts/submit_training.sh (gitignored),
+# so the hosted-training container is self-contained with no extra install.
+include = ["code_smoke.py", "pyproject.toml", "laguna_rlvr/**/*.py"]
 
 [tool.verifiers.eval]
 num_examples = 3
