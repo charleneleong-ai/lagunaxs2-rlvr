@@ -16,6 +16,6 @@ Tier 1 = injected-bug MBPP (local, $0). Tier 2 = point the same rubric at a real
 
 ```bash
 export OLLAMA_API_KEY=ollama
-uv run python -m laguna_finetune.probe env=agentic_repair model=ollama   # dev
+uv run python -m laguna_rlvr.probe env=agentic_repair model=ollama   # dev
 prime eval run agentic_repair -m poolside/laguna-xs.2                     # Laguna
 ```

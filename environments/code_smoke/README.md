@@ -10,5 +10,5 @@ to validate the probe → reward → report pipeline before the real targets.
 
 ```bash
 export OLLAMA_API_KEY=ollama
-uv run python -m laguna_finetune.probe env=code_smoke model=ollama
+uv run python -m laguna_rlvr.probe env=code_smoke model=ollama
 ```

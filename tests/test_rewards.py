@@ -1,6 +1,6 @@
 import pytest
 
-from laguna_finetune.rewards import (
+from laguna_rlvr.rewards import (
     RolloutState,
     binary,
     diff_ratio,

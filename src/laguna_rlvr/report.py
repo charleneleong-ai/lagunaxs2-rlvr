@@ -38,12 +38,19 @@ def load_records(probe_dir: Path) -> pd.DataFrame:
 
 
 def rank(df: pd.DataFrame) -> list[DomainRanking]:
-    """Rank (env, model) groups by signal = base_rate × reward-variance, descending."""
+    """Rank (env, model) groups by learnable signal, descending.
+
+    signal = success spread (Bernoulli variance, base_rate·(1−base_rate)) — peaks at 0.5,
+    zero when the model solves everything (base_rate=1) or nothing (base_rate=0). This is the
+    real RL-gradient proxy; reward variance alone is fooled by efficiency-bonus jitter on a
+    fully-solved domain. `variance` (reward variance) is kept as an informational column.
+    """
     rankings: list[DomainRanking] = []
     for (env, model), g in df.groupby(["env", "model"], sort=False):
         base = float(g["success"].mean())
         variance = float(g["reward"].var(ddof=0)) if len(g) > 1 else 0.0
-        rankings.append(DomainRanking(env, model, len(g), base, variance, base * variance, variance > 0.0))
+        signal = base * (1.0 - base)
+        rankings.append(DomainRanking(env, model, len(g), base, variance, signal, signal > 0.0))
     return sorted(rankings, key=lambda r: r.signal, reverse=True)
 
 

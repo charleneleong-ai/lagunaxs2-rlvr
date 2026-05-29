@@ -1,6 +1,6 @@
 import pytest
 
-from laguna_finetune.code_exec import extract_code, score_code
+from laguna_rlvr.code_exec import extract_code, score_code
 
 
 class TestExtractCode:

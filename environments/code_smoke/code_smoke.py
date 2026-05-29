@@ -13,8 +13,8 @@ from __future__ import annotations
 import verifiers as vf
 from datasets import Dataset, load_dataset
 
-from laguna_finetune.code_exec import extract_code, score_code   # vendor before any Hub push
-from laguna_finetune.rewards import RolloutState, binary, shaped
+from laguna_rlvr.code_exec import extract_code, message_text, score_code   # vendor before any Hub push
+from laguna_rlvr.rewards import RolloutState, binary, shaped
 
 _REPLY = "\nReply with a ```python code block."
 
@@ -52,18 +52,6 @@ def _load_tasks(source: str, n_tasks: int | None, start: int,
         prompt = (r.get(prompt_field) or "").strip()
         tasks.append((prompt + _REPLY, list(r.get(tests_field) or []), r.get(setup_field) or ""))
     return tasks
-
-
-def _text(message) -> str:
-    """Get text from a str, a dict, or a verifiers pydantic Message (which carries `.content`)."""
-    if isinstance(message, str):
-        return message
-    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):  # multimodal content parts
-        return "".join(p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "") for p in content)
-    return ""
 
 
 class CodeRepairEnv(vf.MultiTurnEnv):
@@ -110,7 +98,7 @@ class CodeRepairEnv(vf.MultiTurnEnv):
     async def env_response(self, messages, state, **kwargs):
         info = state["info"]
         setup, tests = info.get("setup", ""), info["tests"]
-        code = extract_code(_text(messages[-1]))
+        code = extract_code(message_text(messages[-1]))
         program = f"{setup}\n{code}" if setup else code
         failed = [t for t in tests if score_code(program, [t], self._timeout)[0] == 0]
         state["tests_passed"] = len(tests) - len(failed)

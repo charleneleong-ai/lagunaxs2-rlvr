@@ -1,0 +1,22 @@
+[project]
+name = "general-agent"
+description = "Multi-turn tool-use env over general-agent-style tasks (Pydantic DB + tools + verifier)."
+tags = ["tool-use", "agent", "multi-turn", "rl", "eval"]
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "verifiers>=0.1.14",
+    "datasets>=2.19",
+    "pydantic>=2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["general_agent.py", "pyproject.toml"]
+
+[tool.verifiers.eval]
+num_examples = 2
+rollouts_per_example = 1

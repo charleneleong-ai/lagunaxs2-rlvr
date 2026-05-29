@@ -1,5 +1,5 @@
-from laguna_finetune.report import DomainRanking
-from laguna_finetune.rl import should_train
+from laguna_rlvr.report import DomainRanking
+from laguna_rlvr.rl import should_train
 
 
 def _ranking(env: str, variance: float, base: float = 0.5) -> DomainRanking:
