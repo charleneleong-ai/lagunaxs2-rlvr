@@ -18,6 +18,9 @@ wandb/
 !.env.example
 *.local
 
+# prime env push metadata (regenerated on push: wheel hashes, version)
+.prime/
+
 # locally-cloned reference, not part of this repo
 lab-cookbook/
 
