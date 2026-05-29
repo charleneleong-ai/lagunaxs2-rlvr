@@ -19,8 +19,11 @@ class AdapterPlan:
     max_sequence_length: int
     modality: str
     encoder_model: str
+    encoder_role: str
     freeze_encoder: bool
+    fallback_encoder_model: str
     adapter_kind: str
+    objective: str
     output_tokens: int
     train_projector: bool
     lora_enabled: bool
@@ -58,8 +61,11 @@ def plan_from_config(cfg: dict[str, Any]) -> AdapterPlan:
         max_sequence_length=int(backbone.get("max_sequence_length", 8192)),
         modality=str(modality.get("kind", "image")),
         encoder_model=str(modality.get("encoder_id", "")),
+        encoder_role=str(modality.get("encoder_role", "generic_visual_encoder")),
         freeze_encoder=bool(modality.get("freeze_encoder", True)),
+        fallback_encoder_model=str(modality.get("fallback_encoder_id", "")),
         adapter_kind=str(adapter.get("kind", "projector")),
+        objective=str(adapter.get("objective", "visual_alignment")),
         output_tokens=int(adapter.get("output_tokens", 64)),
         train_projector=bool(adapter.get("train_projector", True)),
         lora_enabled=bool(training.get("lora_enabled", False)),
@@ -100,12 +106,16 @@ def render_plan(plan: AdapterPlan) -> str:
     lines = [
         f"Experiment: {plan.name}",
         f"Backbone: {plan.backbone_model} ({plan.backbone_quantization}, frozen={plan.freeze_backbone})",
-        f"Modality: {plan.modality} via {plan.encoder_model} (frozen={plan.freeze_encoder})",
-        f"Adapter: {plan.adapter_kind}, {plan.output_tokens} learned tokens, train_projector={plan.train_projector}",
+        f"Modality: {plan.modality} via {plan.encoder_model} as {plan.encoder_role} "
+        f"(frozen={plan.freeze_encoder})",
+        f"Adapter: {plan.adapter_kind}, objective={plan.objective}, "
+        f"{plan.output_tokens} learned tokens, train_projector={plan.train_projector}",
         f"Training: micro_batch={plan.micro_batch_size}, grad_accum={plan.gradient_accumulation_steps}, "
         f"effective_batch={plan.effective_batch_size}",
         f"Guardrail: {plan.max_vram_gb:g}GB VRAM with {plan.reserve_vram_gb:g}GB reserved",
     ]
+    if plan.fallback_encoder_model:
+        lines.append(f"Fallback encoder: {plan.fallback_encoder_model}")
     issues = validate_a100_40gb(plan)
     if issues:
         lines.append("Blocking issues:")

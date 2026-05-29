@@ -10,12 +10,15 @@ _CONFIG = {
         "max_sequence_length": 8192,
     },
     "modality": {
-        "kind": "image",
-        "encoder_id": "google/siglip-base-patch16-224",
+        "kind": "document_image",
+        "encoder_id": "zai-org/GLM-OCR",
+        "encoder_role": "ocr_context_encoder",
+        "fallback_encoder_id": "google/siglip2-base-patch16-naflex",
         "freeze_encoder": True,
     },
     "adapter": {
-        "kind": "resampler_projector",
+        "kind": "ocr_context_projector",
+        "objective": "optical_context_reconstruction",
         "output_tokens": 64,
         "train_projector": True,
     },
@@ -35,6 +38,9 @@ _CONFIG = {
 def test_projector_only_plan_passes_a100_guardrails():
     plan = plan_from_config(_CONFIG)
     assert plan.effective_batch_size == 16
+    assert plan.encoder_model == "zai-org/GLM-OCR"
+    assert plan.encoder_role == "ocr_context_encoder"
+    assert plan.objective == "optical_context_reconstruction"
     assert validate_a100_40gb(plan) == []
 
 
@@ -52,4 +58,6 @@ def test_unfrozen_backbone_and_too_many_tokens_are_blocked():
 def test_render_plan_explains_guardrail_status():
     rendered = render_plan(plan_from_config(_CONFIG))
     assert "poolside/Laguna-XS.2-NVFP4" in rendered
+    assert "zai-org/GLM-OCR" in rendered
+    assert "google/siglip2-base-patch16-naflex" in rendered
     assert "A100-40GB guardrails: pass" in rendered

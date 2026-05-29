@@ -1,7 +1,8 @@
-# Projector-only native-adapter proof of concept for one A100 40GB.
-# This is a scaffold, not a full training recipe: keep the backbone and encoder frozen, prove that
-# visual/state tokens can align to Laguna's text-token space, then consider QLoRA/RLVR later.
-name = "laguna-xs2-a100-projector"
+# Projector-only visual-context proof of concept for one A100 40GB.
+# This is a scaffold, not a full training recipe: use GLM-OCR as the primary OCR/context encoder,
+# keep the Laguna backbone frozen, and prove that compressed visual context can feed Laguna's
+# text/code reasoning before considering QLoRA/RLVR.
+name = "laguna-xs2-glm-ocr-visual-context"
 
 [backbone]
 model_id = "poolside/Laguna-XS.2-NVFP4"
@@ -10,12 +11,15 @@ freeze = true
 max_sequence_length = 8192
 
 [modality]
-kind = "image"
-encoder_id = "google/siglip-base-patch16-224"
+kind = "document_image"
+encoder_id = "zai-org/GLM-OCR"
+encoder_role = "ocr_context_encoder"
+fallback_encoder_id = "google/siglip2-base-patch16-naflex"
 freeze_encoder = true
 
 [adapter]
-kind = "resampler_projector"
+kind = "ocr_context_projector"
+objective = "optical_context_reconstruction"
 output_tokens = 64
 train_projector = true
 
