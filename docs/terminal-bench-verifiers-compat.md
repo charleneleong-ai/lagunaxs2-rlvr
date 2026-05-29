@@ -28,6 +28,6 @@ Other gotchas hit: `prime env install` is broken (emits `--exclude-newer-package
 2. **Real TB result at the event: official `terminal-bench-2` + a reward `CallableEntry`.** Don't fork — add `shaped_harbor_reward` (parses `state["harbor_tests"]["stdout"]` → pass fraction) via config, run on sponsored sandboxes. Minimal code.
 3. **Local TB (if truly needed): vendor popfido's `DockerExecutor`, write fresh 0.1.14 glue.** ~400 lines, only fully testable via Docker. Highest effort; defer unless local TB is essential.
 
-## Status of `environments/terminal_bench_curated/`
+## Status
 
-Built on the stale ibrahim API → **does not run on verifiers 0.1.14**. Kept for the reward/curation logic and as a porting reference. Do not `prime eval run` it as-is; pursue path 1 or 2 first.
+`environments/terminal_bench_curated/` was **removed** (commit after 8237355) — it forked the stale ibrahim API and can't run on 0.1.14. The reward/curation logic lives on in `src/laguna_finetune/rewards.py` (+ tests). Pursue path 1 (no-Docker env) or path 2 (official v1 Harbor + reward `CallableEntry`).

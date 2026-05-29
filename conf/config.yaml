@@ -1,6 +1,6 @@
 defaults:
   - model: proxy        # default cheap model; opt into laguna explicitly (protects quota)
-  - env: tb_curated
+  - env: swe_multilingual
   - reward: partial
   - rl: laguna_small
   - _self_
