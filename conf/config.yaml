@@ -1,6 +1,6 @@
 defaults:
   - model: proxy        # default cheap model; opt into laguna explicitly (protects quota)
-  - env: swe_multilingual
+  - env: code_smoke
   - reward: partial
   - rl: laguna_small
   - _self_
