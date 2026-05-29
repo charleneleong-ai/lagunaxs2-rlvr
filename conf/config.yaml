@@ -1,0 +1,23 @@
+defaults:
+  - model: proxy        # default cheap model; opt into laguna explicitly (protects quota)
+  - env: tb_curated
+  - reward: partial
+  - rl: laguna_small
+  - _self_
+
+wandb:
+  project: laguna-finetune
+  entity: ???           # set before first run
+
+paths:
+  results: ${hydra:runtime.cwd}/results
+
+probe:
+  num_examples: 20
+  rollouts_per_example: 3
+  success_key: success  # keys to read from prime eval's saved rollout records
+  reward_key: reward
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d_%H-%M-%S}

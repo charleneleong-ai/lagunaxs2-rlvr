@@ -66,7 +66,7 @@ laguna-finetune/
 
 | Module | Responsibility | Interface |
 |---|---|---|
-| `probe.py` | For each `env × model`, shell out to `prime eval run`, parse rollout JSONL, emit per-task records | `python -m laguna_finetune.probe -m env=tb_curated,multilingual model=proxy,laguna` |
+| `probe.py` | For each `env × model`, shell out to `prime eval run` (forwarding `--temperature` and the merged `env.args` + `reward` group as `--env-args`, so config is authoritative), parse rollout JSONL, emit per-task records | `python -m laguna_finetune.probe -m env=tb_curated,multilingual model=proxy,laguna` |
 | `rewards.py` | Pure, importable shaping fns. No I/O. | `binary(state)` · `partial_credit(state)` · `efficiency_bonus(state) -> float` |
 | `report.py` | Rank `results/probe/*.jsonl` by `base_rate × variance`; wandb summary + PNG | `python -m laguna_finetune.report` → `results/probe/ranking.{md,png}` |
 | `rl.py` | Launch `prime-rl` on chosen env+reward; stream reward curve. Refuses if probe `variance == 0`. | `python -m laguna_finetune.rl env=<winner> reward=partial rl=laguna_small` |

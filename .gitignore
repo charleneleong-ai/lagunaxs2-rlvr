@@ -9,7 +9,8 @@ __pycache__/
 
 # Experiment artefacts (regenerated)
 results/
-outputs/            # Hydra default run dir
+# Hydra default run dir
+outputs/
 wandb/
 
 # Env / secrets
