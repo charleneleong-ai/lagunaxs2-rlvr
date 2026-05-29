@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 
-_CODE_BLOCK = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL)
+_CODE_BLOCK = re.compile(r"```[a-zA-Z0-9_+\-]*\n(.*?)```", re.DOTALL)  # any/no lang label, case-insensitive
 
 
 def extract_code(text: str) -> str:

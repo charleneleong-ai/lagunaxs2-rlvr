@@ -6,8 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import hydra
+import matplotlib
 import pandas as pd
 from omegaconf import DictConfig
+
+matplotlib.use("Agg")  # headless backend; set before importing pyplot
+import matplotlib.pyplot as plt  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -54,10 +58,6 @@ def render_markdown(rankings: list[DomainRanking]) -> str:
 
 
 def _plot(rankings: list[DomainRanking], path: Path) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     labels = [f"{r.env}\n{r.model}" for r in rankings]
     colors = ["#2a9d8f" if r.learnable else "#e76f51" for r in rankings]
     fig, ax = plt.subplots(figsize=(max(4.0, len(rankings) * 1.6), 4.0))

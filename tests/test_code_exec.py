@@ -10,6 +10,9 @@ class TestExtractCode:
     def test_pulls_unlabeled_fence(self):
         assert extract_code("```\ny = 2\n```") == "y = 2"
 
+    def test_pulls_capitalized_or_aliased_lang_fence(self):
+        assert extract_code("```Python\ndef f(): return 1\n```") == "def f(): return 1"
+
     def test_falls_back_to_whole_text(self):
         assert extract_code("def f(): return 1") == "def f(): return 1"
 

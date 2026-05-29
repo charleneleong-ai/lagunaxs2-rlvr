@@ -28,7 +28,15 @@ _TASKS = [
 
 
 def _text(message) -> str:
-    return message.get("content", "") if isinstance(message, dict) else str(message)
+    """Get text from a str, a dict, or a verifiers pydantic Message (which carries `.content`)."""
+    if isinstance(message, str):
+        return message
+    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):  # multimodal content parts
+        return "".join(p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "") for p in content)
+    return ""
 
 
 class CodeRepairEnv(vf.MultiTurnEnv):
