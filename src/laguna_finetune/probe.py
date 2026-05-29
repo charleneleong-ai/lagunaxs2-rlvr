@@ -11,7 +11,8 @@ from omegaconf import DictConfig, OmegaConf
 
 def build_eval_command(env: str, model: str, provider: str, num_examples: int,
                        rollouts_per_example: int, max_tokens: int, temperature: float,
-                       output_dir: Path, env_args: dict | None = None) -> list[str]:
+                       output_dir: Path, env_args: dict | None = None,
+                       api_base_url: str | None = None, api_key_var: str | None = None) -> list[str]:
     cmd = [
         "prime", "eval", "run", env,
         "--provider", provider,
@@ -24,6 +25,10 @@ def build_eval_command(env: str, model: str, provider: str, num_examples: int,
     ]
     if env_args:
         cmd += ["--env-args", json.dumps(env_args)]
+    if api_base_url:                       # e.g. local Ollama at http://localhost:11434/v1
+        cmd += ["--api-base-url", api_base_url]
+    if api_key_var:
+        cmd += ["--api-key-var", api_key_var]
     return cmd
 
 
@@ -49,7 +54,9 @@ def main(cfg: DictConfig) -> None:
                 **OmegaConf.to_container(cfg.reward, resolve=True)}  # reward group flows into the env
     cmd = build_eval_command(cfg.env.module, cfg.model.name, cfg.model.provider,
                              cfg.probe.num_examples, cfg.probe.rollouts_per_example,
-                             cfg.model.max_tokens, cfg.model.temperature, raw_dir, env_args)
+                             cfg.model.max_tokens, cfg.model.temperature, raw_dir, env_args,
+                             api_base_url=cfg.model.get("api_base_url"),
+                             api_key_var=cfg.model.get("api_key_var"))
     subprocess.run(cmd, check=True)
 
     records = normalize_records(_load_raw_results(raw_dir), cfg.probe.success_key, cfg.probe.reward_key)

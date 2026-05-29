@@ -1,0 +1,8 @@
+# Fully-local, $0, no API key — Ollama's OpenAI-compatible endpoint. Needs `ollama serve` + the model pulled.
+name: qwen3:8b
+slug: qwen3
+provider: openai
+api_base_url: http://localhost:11434/v1
+api_key_var: OLLAMA_API_KEY   # Ollama ignores the value; export any non-empty string
+max_tokens: 2048
+temperature: 0.7

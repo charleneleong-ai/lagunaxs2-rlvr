@@ -23,6 +23,15 @@ class TestBuildEvalCommand:
     def test_omits_env_args_when_empty(self):
         assert "--env-args" not in self._cmd(env_args=None)
 
+    def test_forwards_local_endpoint(self):
+        cmd = self._cmd(api_base_url="http://localhost:11434/v1", api_key_var="OLLAMA_API_KEY")
+        assert cmd[cmd.index("--api-base-url") + 1] == "http://localhost:11434/v1"
+        assert cmd[cmd.index("--api-key-var") + 1] == "OLLAMA_API_KEY"
+
+    def test_omits_endpoint_flags_by_default(self):
+        cmd = self._cmd()
+        assert "--api-base-url" not in cmd and "--api-key-var" not in cmd
+
 
 def test_normalize_records_projects_onto_success_reward():
     raw = [{"ok": True, "r": 1.0, "extra": 9}, {"ok": False, "r": 0.0}]
