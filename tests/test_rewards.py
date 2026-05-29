@@ -3,10 +3,13 @@ import pytest
 from laguna_finetune.rewards import (
     RolloutState,
     binary,
+    diff_ratio,
     efficiency_bonus,
     make_scorer,
     partial_credit,
+    agreement_score,
     shaped,
+    token_efficiency,
 )
 
 
@@ -53,6 +56,43 @@ class TestShaped:
 @pytest.mark.parametrize("succeeded,expected", [(True, 1.0), (False, 0.0)])
 def test_binary(succeeded, expected):
     assert binary(_state(succeeded=succeeded)) == expected
+
+
+class TestTokenEfficiency:
+    @pytest.mark.parametrize("used,budget,expected", [(0, 100, 1.0), (50, 100, 0.5), (100, 100, 0.0), (150, 100, 0.0)])
+    def test_value(self, used, budget, expected):
+        assert token_efficiency(used, budget) == pytest.approx(expected)
+
+    def test_zero_budget_is_zero(self):
+        assert token_efficiency(10, 0) == 0.0
+
+
+class TestDiffRatio:
+    def test_identical_is_one(self):
+        assert diff_ratio("def f(): return 1", "def f(): return 1") == 1.0
+
+    def test_both_empty_is_one(self):
+        assert diff_ratio("", "") == 1.0
+
+    def test_small_edit_scores_higher_than_rewrite(self):
+        base = "def f(x): return x + 1"
+        small = diff_ratio(base, "def f(x): return x - 1")     # one-char fix
+        rewrite = diff_ratio(base, "class Q:\n    pass\nlambda: 0")
+        assert small > rewrite
+
+
+class TestAgreementScore:
+    def test_too_few_tests_is_zero(self):
+        assert agreement_score(self_passed=1, self_total=1, hidden_pass_fraction=1.0, min_tests=2) == 0.0
+
+    def test_perfect_match_is_one(self):
+        assert agreement_score(3, 3, hidden_pass_fraction=1.0) == 1.0
+
+    def test_self_says_pass_but_hidden_fails(self):
+        assert agreement_score(3, 3, hidden_pass_fraction=0.0) == 0.0
+
+    def test_partial_match(self):
+        assert agreement_score(1, 2, hidden_pass_fraction=0.5) == pytest.approx(1.0)
 
 
 class TestMakeScorer:
