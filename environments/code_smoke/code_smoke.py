@@ -1,30 +1,46 @@
 """Multi-turn, no-Docker code-repair env: write a function, run its tests, fix on failures, repeat.
 
-Dev-friendly smoke env to green the probe->reward->report pipeline locally with any
-OpenAI-compatible model (e.g. Ollama), $0, no sandbox. Exercises the agentic loop and the
-dense shaped reward (test-pass fraction + an efficiency nudge for solving in fewer turns).
+Tasks come from MBPP (a real difficulty spread, so a strong model's pass rate is intermediate ->
+a learnable RL gradient), with a small `builtin` set for offline/tests. Reward is dense shaped
+partial credit (test-pass fraction + an efficiency nudge for solving in fewer turns).
 
-Targets the verifiers 0.1.14 MultiTurnEnv API: override setup_state (mutate in place) and
-env_response (-> Messages); completion via the @vf.stop method; scoring via the rubric.
+verifiers 0.1.14 MultiTurnEnv API: override setup_state (mutate in place) and env_response
+(-> Messages); completion via the @vf.stop method; scoring via the rubric. No sandbox — tests
+run in a local subprocess (code_exec.score_code), so it's $0 with any OpenAI-compatible model.
 """
 from __future__ import annotations
 
 import verifiers as vf
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 
 from laguna_finetune.code_exec import extract_code, score_code   # vendor before any Hub push
 from laguna_finetune.rewards import RolloutState, binary, shaped
 
-_TASKS = [
-    ("Write a Python function `add(a, b)` that returns their sum. Reply with a ```python code block.",
-     ["assert add(2, 3) == 5", "assert add(-1, 1) == 0", "assert add(0, 0) == 0"]),
-    ("Write a Python function `is_palindrome(s)` returning True iff s reads the same backwards. "
-     "Reply with a ```python code block.",
-     ["assert is_palindrome('racecar')", "assert not is_palindrome('hello')", "assert is_palindrome('')"]),
-    ("Write a Python function `fib(n)` returning the n-th Fibonacci number (fib(0)=0, fib(1)=1). "
-     "Reply with a ```python code block.",
-     ["assert fib(0) == 0", "assert fib(1) == 1", "assert fib(10) == 55"]),
+_REPLY = "\nReply with a ```python code block."
+
+# (prompt, tests, setup) — setup is scaffolding (imports) prepended before running the asserts.
+_BUILTIN_TASKS = [
+    ("Write a Python function `add(a, b)` that returns their sum." + _REPLY,
+     ["assert add(2, 3) == 5", "assert add(-1, 1) == 0", "assert add(0, 0) == 0"], ""),
+    ("Write a Python function `is_palindrome(s)` returning True iff s reads the same backwards." + _REPLY,
+     ["assert is_palindrome('racecar')", "assert not is_palindrome('hello')", "assert is_palindrome('')"], ""),
+    ("Write a Python function `fib(n)` returning the n-th Fibonacci number (fib(0)=0, fib(1)=1)." + _REPLY,
+     ["assert fib(0) == 0", "assert fib(1) == 1", "assert fib(10) == 55"], ""),
 ]
+
+
+def _load_tasks(source: str, n_tasks: int | None, start: int) -> list[tuple[str, list[str], str]]:
+    if source == "builtin":
+        return _BUILTIN_TASKS
+    if source == "mbpp":
+        ds = load_dataset("google-research-datasets/mbpp", "full", split="test")  # 500 tasks, each with asserts
+        end = len(ds) if not n_tasks else min(start + n_tasks, len(ds))
+        tasks = []
+        for r in ds.select(range(start, end)):
+            prompt = (r.get("text") or r.get("prompt") or "").strip()
+            tasks.append((prompt + _REPLY, list(r["test_list"]), r.get("test_setup_code") or ""))
+        return tasks
+    raise ValueError(f"unknown task source {source!r} (use 'mbpp' or 'builtin')")
 
 
 def _text(message) -> str:
@@ -42,7 +58,7 @@ def _text(message) -> str:
 class CodeRepairEnv(vf.MultiTurnEnv):
     def __init__(self, tasks, *, max_turns: int, timeout: float, fn: str, efficiency_weight: float, **kwargs):
         self._timeout = timeout
-        rows = [{"question": prompt, "answer": "", "info": {"tests": tests}} for prompt, tests in tasks]
+        rows = [{"question": p, "answer": "", "info": {"tests": t, "setup": s}} for p, t, s in tasks]
         rubric = vf.Rubric(
             funcs=[self._reward_fn(fn, max_turns, efficiency_weight), self._success_fn(max_turns)],
             weights=[1.0, 0.0],  # success is a logged metric, not scored
@@ -81,9 +97,11 @@ class CodeRepairEnv(vf.MultiTurnEnv):
         return bool(state.get("solved", False))
 
     async def env_response(self, messages, state, **kwargs):
+        info = state["info"]
+        setup, tests = info.get("setup", ""), info["tests"]
         code = extract_code(_text(messages[-1]))
-        tests = state["info"]["tests"]
-        failed = [t for t in tests if score_code(code, [t], self._timeout)[0] == 0]
+        program = f"{setup}\n{code}" if setup else code
+        failed = [t for t in tests if score_code(program, [t], self._timeout)[0] == 0]
         state["tests_passed"] = len(tests) - len(failed)
         state["tests_total"] = len(tests)
         if not failed:
@@ -94,7 +112,8 @@ class CodeRepairEnv(vf.MultiTurnEnv):
         return [{"role": "user", "content": feedback}]
 
 
-def load_environment(max_turns: int = 5, timeout: float = 5.0,
+def load_environment(source: str = "mbpp", n_tasks: int | None = 20, start: int = 0,
+                     max_turns: int = 5, timeout: float = 5.0,
                      fn: str = "shaped", efficiency_weight: float = 0.1, **kwargs) -> vf.Environment:
-    return CodeRepairEnv(_TASKS, max_turns=max_turns, timeout=timeout,
+    return CodeRepairEnv(_load_tasks(source, n_tasks, start), max_turns=max_turns, timeout=timeout,
                          fn=fn, efficiency_weight=efficiency_weight)
