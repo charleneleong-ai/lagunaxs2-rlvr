@@ -47,3 +47,7 @@ run = "bash scripts/rlvr_loop.sh"
 [tasks.train]
 description = "Launch the free hosted Laguna RL run from the toml config"
 run = "prime train configs/rl/laguna-xs2.toml"
+
+[tasks.mm-adapter-plan]
+description = "Dry-run the A100 40GB generalized adapter scaffold"
+run = "uv run python scripts/mm_adapter_plan.py configs/mm_adapter/a100-40gb-projector.toml"

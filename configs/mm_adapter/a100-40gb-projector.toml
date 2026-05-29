@@ -1,0 +1,33 @@
+# Projector-only native-adapter proof of concept for one A100 40GB.
+# This is a scaffold, not a full training recipe: keep the backbone and encoder frozen, prove that
+# visual/state tokens can align to Laguna's text-token space, then consider QLoRA/RLVR later.
+name = "laguna-xs2-a100-projector"
+
+[backbone]
+model_id = "poolside/Laguna-XS.2-NVFP4"
+quantization = "4bit-nvfp4"
+freeze = true
+max_sequence_length = 8192
+
+[modality]
+kind = "image"
+encoder_id = "google/siglip-base-patch16-224"
+freeze_encoder = true
+
+[adapter]
+kind = "resampler_projector"
+output_tokens = 64
+train_projector = true
+
+[training]
+stage = "projector_sft"
+micro_batch_size = 1
+gradient_accumulation_steps = 16
+learning_rate = 0.0001
+max_steps = 1000
+lora_enabled = false
+
+[a100_40gb_guardrails]
+max_vram_gb = 40
+reserve_vram_gb = 4
+max_output_tokens = 128
