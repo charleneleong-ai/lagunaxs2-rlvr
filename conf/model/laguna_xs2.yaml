@@ -1,5 +1,7 @@
-# The target model. `provider: prime` requires `prime login` and consumes credits.
-name: poolside/Laguna-XS.2
+# The target model for eval/probe (Prime inference). NOTE: inference id is lowercase
+# `poolside/laguna-xs.2`; the capitalized `poolside/Laguna-XS.2` is the *training* id (used in
+# configs/rl/laguna-xs2.toml) and 404s on the inference API.
+name: poolside/laguna-xs.2
 slug: laguna
 provider: prime
 max_tokens: 8192

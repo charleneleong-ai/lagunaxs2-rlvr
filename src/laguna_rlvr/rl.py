@@ -6,7 +6,7 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig
 
-from laguna_finetune.report import DomainRanking, load_records, rank
+from laguna_rlvr.report import DomainRanking, load_records, rank
 
 
 def should_train(rankings: list[DomainRanking], env: str) -> tuple[bool, str]:

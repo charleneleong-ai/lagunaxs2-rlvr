@@ -19,3 +19,31 @@ run = [
 [tasks.login]
 description = "Authenticate the Prime CLI (interactive — opens browser)"
 run = "prime login"
+
+[tasks.test]
+description = "Run the test suite"
+run = "uv run pytest -q"
+
+[tasks.probe]
+description = "Probe a model on an env. Args after --, e.g. `mise run probe -- env=code_smoke model=ollama`"
+run = "uv run python -m laguna_rlvr.probe"
+
+[tasks.report]
+description = "Rank probe results by learnable signal -> results/probe/ranking.{md,png}"
+run = "uv run python -m laguna_rlvr.report"
+
+[tasks.verify-seed]
+description = "Check every Adaption seed row is verifiable (ref passes all tests, empty stub fails)"
+run = "uv run python scripts/verify_seed.py docs/adaption/seed_multilingual_coding.jsonl"
+
+[tasks.synthesize]
+description = "Synthesize a verifiable general-agent corpus (LLM -> self-consistent tasks). Args: domains."
+run = "uv run python -m laguna_rlvr.synth"
+
+[tasks.rlvr-loop]
+description = "One self-evolving RLVR turn: synthesize -> probe base rate -> rank learnable -> gate/train. Args: domains."
+run = "bash scripts/rlvr_loop.sh"
+
+[tasks.train]
+description = "Launch the free hosted Laguna RL run from the toml config"
+run = "prime train configs/rl/laguna-xs2.toml"

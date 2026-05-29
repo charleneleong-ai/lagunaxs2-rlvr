@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from laguna_finetune.probe import build_eval_command, normalize_records
+from laguna_rlvr.probe import build_eval_command, normalize_records
 
 
 class TestBuildEvalCommand:

@@ -49,4 +49,4 @@ Integration note: its `load_environment(config: vf.EnvConfig, *, max_turns)` tak
 
 ## Status
 
-`environments/terminal_bench_curated/` was **removed** (commit after 8237355) — it forked the stale ibrahim API and can't run on 0.1.14. The reward/curation logic lives on in `src/laguna_finetune/rewards.py` (+ tests). Pursue path 1 (no-Docker env) or path 2 (official v1 Harbor + reward `CallableEntry`).
+`environments/terminal_bench_curated/` was **removed** (commit after 8237355) — it forked the stale ibrahim API and can't run on 0.1.14. The reward/curation logic lives on in `src/laguna_rlvr/rewards.py` (+ tests). Pursue path 1 (no-Docker env) or path 2 (official v1 Harbor + reward `CallableEntry`).

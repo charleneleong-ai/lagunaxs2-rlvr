@@ -15,4 +15,11 @@ wandb/
 
 # Env / secrets
 .env
+!.env.example
 *.local
+
+# locally-cloned reference, not part of this repo
+lab-cookbook/
+
+# large reference binary
+*.pdf

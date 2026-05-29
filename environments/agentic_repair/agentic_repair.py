@@ -15,8 +15,8 @@ from __future__ import annotations
 import verifiers as vf
 from datasets import Dataset, load_dataset
 
-from laguna_finetune.code_exec import extract_code, score_code   # vendor before any Hub push
-from laguna_finetune.rewards import RolloutState, agreement_score, diff_ratio, efficiency_bonus
+from laguna_rlvr.code_exec import extract_code, score_code   # vendor before any Hub push
+from laguna_rlvr.rewards import RolloutState, agreement_score, diff_ratio, efficiency_bonus
 
 # Deterministic single-edit mutations that tend to break behavior (no RNG — reproducible).
 _MUTATIONS = [("==", "!="), ("<=", ">"), (">=", "<"), (" < ", " > "), (" > ", " < "),

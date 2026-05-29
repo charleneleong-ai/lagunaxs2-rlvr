@@ -51,7 +51,7 @@ laguna-finetune/
 ├── environments/                  # PI-native verifiers envs (own pyproject → Hub-submittable)
 │   ├── terminal_bench_curated/
 │   └── swe_multilingual/
-├── src/laguna_finetune/
+├── src/laguna_rlvr/
 │   ├── probe.py                   # @hydra.main → prime eval run sweep → results/probe/*.jsonl
 │   ├── rewards.py                 # pure shaping fns, imported by envs + report
 │   ├── report.py                  # aggregate → ranking.{md,png} + wandb
@@ -66,10 +66,10 @@ laguna-finetune/
 
 | Module | Responsibility | Interface |
 |---|---|---|
-| `probe.py` | For each `env × model`, shell out to `prime eval run` (forwarding `--temperature` and the merged `env.args` + `reward` group as `--env-args`, so config is authoritative), parse rollout JSONL, emit per-task records | `python -m laguna_finetune.probe -m env=tb_curated,multilingual model=proxy,laguna` |
+| `probe.py` | For each `env × model`, shell out to `prime eval run` (forwarding `--temperature` and the merged `env.args` + `reward` group as `--env-args`, so config is authoritative), parse rollout JSONL, emit per-task records | `python -m laguna_rlvr.probe -m env=tb_curated,multilingual model=proxy,laguna` |
 | `rewards.py` | Pure, importable shaping fns. No I/O. | `binary(state)` · `partial_credit(state)` · `efficiency_bonus(state) -> float` |
-| `report.py` | Rank `results/probe/*.jsonl` by `base_rate × variance`; wandb summary + PNG | `python -m laguna_finetune.report` → `results/probe/ranking.{md,png}` |
-| `rl.py` | Launch `prime-rl` on chosen env+reward; stream reward curve. Refuses if probe `variance == 0`. | `python -m laguna_finetune.rl env=<winner> reward=partial rl=laguna_small` |
+| `report.py` | Rank `results/probe/*.jsonl` by `base_rate × variance`; wandb summary + PNG | `python -m laguna_rlvr.report` → `results/probe/ranking.{md,png}` |
+| `rl.py` | Launch `prime-rl` on chosen env+reward; stream reward curve. Refuses if probe `variance == 0`. | `python -m laguna_rlvr.rl env=<winner> reward=partial rl=laguna_small` |
 
 Environments are standalone `verifiers` packages; they import shaping fns from `rewards.py` but own their dataset + rubric. The entrypoint matches what `prime env init` actually generates (verified 2026-05-29 against CLI 0.6.10 / verifiers 0.1.14): `def load_environment(**kwargs) -> vf.Environment`, returning e.g. a `vf.ToolEnv(dataset=..., rubric=vf.Rubric(funcs=[shaped], weights=[1.0]), max_turns=...)`. The generated env `pyproject.toml` uses a `hatchling` build, declares `tags`, and carries `[tool.verifiers.eval]` defaults (`num_examples`, `rollouts_per_example`) that `probe.py` overrides via flags.
 

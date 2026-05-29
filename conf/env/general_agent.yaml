@@ -1,0 +1,6 @@
+module: general_agent
+args:
+  source: builtin       # tiered day-spa set; point at a JSONL corpus (synthesizer output) later
+  max_turns: 6
+  timeout: 5.0
+  # efficiency_weight is merged in from the reward config group by probe.py
