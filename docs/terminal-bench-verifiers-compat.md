@@ -28,23 +28,24 @@ Other gotchas hit: `prime env install` is broken (emits `--exclude-newer-package
 2. **Real TB result at the event: official `terminal-bench-2` + a reward `CallableEntry`.** Don't fork — add `shaped_harbor_reward` (parses `state["harbor_tests"]["stdout"]` → pass fraction) via config, run on sponsored sandboxes. Minimal code.
 3. **Local TB (if truly needed): vendor popfido's `DockerExecutor`, write fresh 0.1.14 glue.** ~400 lines, only fully testable via Docker. Highest effort; defer unless local TB is essential.
 
-## Running the official `terminal-bench-2` (path 2, once credit lands)
+## Running the official `terminal-bench-2` (path 2) — verified against live infra 2026-05-29
 
-Validated technically (Terminus2/Harbor import on `verifiers==0.1.15.dev11`); blocked only on wallet credit.
+Got it running end-to-end on credit (env loads, hosted sandbox provisions, results upload to the Prime dashboard). Three layers had to be peeled, in order — recorded so the event run is fast:
 
-```bash
-# 1. Put credit on the Prime wallet (hosted sandboxes bill compute).
-# 2. v1/Harbor needs the dev verifiers — pin it in pyproject so `uv run` won't revert it:
-uv pip install --prerelease=allow "verifiers>=0.1.15.dev11"
-# 3. prime env install is broken (emits an invalid --exclude-newer-package); pull + editable-install:
-prime env pull primeintellect/terminal-bench-2
-uv pip install -e <pulled-dir>
-# 4. Agent can be local Ollama (free); only the sandbox bills credit:
-export OLLAMA_API_KEY=ollama
-prime eval run terminal_bench_2 --provider openai -m qwen3:8b \
-  -b http://localhost:11434/v1 -k OLLAMA_API_KEY -n 1 -r 1
-```
-Caveat: its `load_environment(config: vf.EnvConfig, *, max_turns)` takes a structured config, not our probe's `--env-args` kwargs — run it directly first, then wire a `conf/env/terminal_bench_2.yaml` + probe adapter. Our partial-credit contribution there = a `shaped_harbor_reward` `CallableEntry` parsing `state["harbor_tests"]["stdout"]`.
+1. **Dev verifiers, isolated.** It needs `verifiers>=0.1.15.dev11` (which requires **Python ≥3.12**) for `verifiers.v1` + `Terminus2`/`HarborTaskset`. Pinning that in our project conflicts with `requires-python>=3.11` and destabilizes the 0.1.14 pipeline — so run it in a **throwaway venv**, not the project:
+   ```bash
+   cd /tmp && uv venv --python 3.12 tb2/.venv && cd tb2
+   uv pip install --python .venv --prerelease=allow "verifiers>=0.1.15.dev11" prime-sandboxes
+   prime env pull primeintellect/terminal-bench-2          # `prime env install` is broken (bad --exclude-newer-package)
+   uv pip install --python .venv -e terminal_bench_2
+   source .venv/bin/activate
+   ```
+2. **The model must be CLOUD-reachable.** `Terminus2` runs the agent *inside* the hosted sandbox, so a local Ollama at `localhost:11434` is unreachable → `SandboxError('command exited with 1')`. Use a Prime-inference model.
+3. **In-sandbox agent auth.** The agent calls the model via **litellm** using `OPENAI_MODEL`; pointing it at `deepseek/...` made litellm hit DeepSeek's own API → `AuthenticationError`, and it looked for a missing `configs/endpoints.toml`. The agent needs Prime's inference **base_url + API key set inside the sandbox** (or an `endpoints.toml`) so litellm routes through `api.pinference.ai` with auth. **This is the piece to get from Prime's technical onboarding.**
+
+**Laguna XS.2 caveat:** `poolside/Laguna-XS.2` is on `prime train models` ($0) but **404s on `api.pinference.ai` (inference)** pre-event — its serving is event-gated. So the actual Laguna run is an event-time activity. (`prime inference models` lists what's servable now: deepseek/gemini/llama/qwen/etc.)
+
+Integration note: its `load_environment(config: vf.EnvConfig, *, max_turns)` takes a structured config, not our probe's `--env-args` kwargs — run it directly first, then wire `conf/env/terminal_bench_2.yaml` + a probe adapter. Our partial-credit contribution there = a `shaped_harbor_reward` `CallableEntry` parsing `state["harbor_tests"]["stdout"]`.
 
 ## Status
 
