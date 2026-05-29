@@ -1,5 +1,10 @@
 """Curated Terminal-Bench (classic, local-Docker) env with a dense partial-credit reward.
 
+STATUS (2026-05-29): does NOT run on the bundled verifiers 0.1.14 — this forks the older
+`ibrahim` API, where `rollout` was overridable; in 0.1.14 `rollout`/`is_completed` are @final.
+Kept for the reward/curation logic + as a porting reference. See
+docs/terminal-bench-verifiers-compat.md for the fast paths (no-Docker env / official v1 Harbor).
+
 Forked from the community `ibrahim/terminal-bench` verifiers wrapper (MIT). Two changes
 vs upstream, both marked `# LAGUNA:`
   1. `_run_tests_and_score` stores per-test `tests_passed`/`tests_total` in state (upstream
