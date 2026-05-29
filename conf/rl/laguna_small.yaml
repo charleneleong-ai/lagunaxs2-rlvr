@@ -1,3 +1,3 @@
-# A short Laguna run to validate config + reward direction before any larger run.
-config: configs/rl/laguna_small.toml   # prime-rl config, authored at the event
-max_steps: 200
+# Points the Hydra rl group at the Prime-native training TOML that rl.py hands to `prime train`.
+config: configs/rl/laguna-xs2.toml   # the actual training spec (Prime's schema)
+max_steps: 50                        # mirrors the toml; informational for our gating/logging

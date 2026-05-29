@@ -1,0 +1,23 @@
+# Free hosted RL of Laguna XS.2 on our MBPP code-repair env.
+#
+#   1) prime env push --path environments/code_smoke     # publish to chaleong/code-smoke
+#   2) prime train configs/rl/laguna-xs2.toml            # free hosted run (<=1 concurrent, batch<=128)
+#
+# Eval before/after to measure the lift:
+#   prime eval run chaleong/code-smoke -m poolside/laguna-xs.2
+model = "poolside/Laguna-XS.2"
+
+max_steps = 50
+batch_size = 64            # rollouts per step (hackathon cap: 128)
+rollouts_per_example = 4   # >1 → within-task reward variance for GRPO-style updates
+learning_rate = 1e-4
+
+[sampling]
+max_tokens = 1024
+enable_thinking = false    # non-thinking for agentic training (hackathon best practice)
+
+[[env]]
+id = "chaleong/code-smoke"
+# env defaults already use MBPP (source="mbpp", n_tasks=20, fn="shaped"); to widen the
+# task pool or switch reward, pass args here once you've confirmed the schema, e.g.:
+# args = { source = "mbpp", n_tasks = 64, max_turns = 3, fn = "shaped", efficiency_weight = 0.1 }
