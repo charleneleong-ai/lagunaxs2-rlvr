@@ -1,0 +1,5 @@
+module: code_smoke
+args:
+  max_turns: 5
+  timeout: 5.0
+  # fn + efficiency_weight are merged in from the reward config group by probe.py
