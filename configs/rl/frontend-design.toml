@@ -1,0 +1,22 @@
+# Free hosted RL of Laguna XS.2 on the frontend-design env.
+# This env shows reward VARIANCE on Laguna (eval: [1.1, 0.0, 1.1], success 0.5) — the learnable
+# success-spread an RLVR run needs. ocr_tool is excluded: Laguna already solves it 4/4 (no gradient).
+#
+#   bash scripts/submit_training.sh frontend_design configs/rl/frontend-design.toml
+#
+# Eval before/after to measure the lift:
+#   mise run eval -- frontend_design -n 8
+model = "poolside/Laguna-XS.2"
+
+max_steps = 60
+batch_size = 64            # rollouts per step (hackathon cap: 128)
+rollouts_per_example = 8   # >1 → within-task reward variance (some rollouts meet more requirements) for GRPO
+learning_rate = 1e-5       # conservative on a small, dense-reward task pool
+
+[sampling]
+max_tokens = 2048          # HTML documents run longer than a code snippet
+enable_thinking = false    # non-thinking for agentic training (hackathon best practice)
+
+[[env]]
+id = "chaleong/frontend-design"
+args = { max_turns = 5 }
