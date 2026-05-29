@@ -15,14 +15,76 @@ import json
 import re
 import subprocess
 import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import verifiers as vf
 from datasets import Dataset
 
-from laguna_rlvr.code_exec import extract_code   # vendor before any Hub push
-from laguna_rlvr.rewards import RolloutState, binary, shaped
-from laguna_rlvr.synth.task import Task, run_solution
+# --- vendored from src/laguna_rlvr: this env ships as a standalone Hub wheel and laguna_rlvr
+#     isn't a PyPI dep, so it can't be a requirement. Trimmed fork of just the subset used
+#     (code_exec + rewards + synth.task) — not a byte-for-byte mirror of the source. ---
+_CODE_BLOCK = re.compile(r"```[a-zA-Z0-9_+\-]*\n(.*?)```", re.DOTALL)
+
+
+def extract_code(text: str) -> str:
+    """Pull the first fenced code block; fall back to the whole text."""
+    m = _CODE_BLOCK.search(text)
+    return (m.group(1) if m else text).strip()
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutState:
+    tests_passed: int
+    tests_total: int
+    turns: int
+    max_turns: int
+    succeeded: bool
+
+
+def binary(s: RolloutState) -> float:
+    return float(s.succeeded)
+
+
+def shaped(s: RolloutState, efficiency_weight: float = 0.1) -> float:
+    """Dense reward: test-pass fraction plus an efficiency nudge paid only on success."""
+    partial = s.tests_passed / s.tests_total if s.tests_total > 0 else 0.0
+    bonus = max(0.0, 1.0 - s.turns / s.max_turns) if s.succeeded and s.max_turns > 0 else 0.0
+    return partial + efficiency_weight * bonus
+
+
+_HARNESS = "import sys as _s; _s.exit(0 if verify() else 1)"
+
+
+@dataclass(frozen=True, slots=True)
+class Task:
+    domain: str
+    tier: int
+    schema_code: str
+    tools_code: str
+    instruction: str
+    gold_solution: str
+    verifier_code: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _assemble_program(task: Task, solution: str | None = None) -> str:
+    """schema + tools + (a candidate solution, default the gold) + verifier + exit-on-verify."""
+    return "\n\n".join([task.schema_code, task.tools_code,
+                        task.gold_solution if solution is None else solution,
+                        task.verifier_code, _HARNESS])
+
+
+def run_solution(task: Task, solution: str | None = None, timeout: float = 5.0) -> bool:
+    """True iff the solution drives the task's verifier to pass (subprocess-isolated)."""
+    try:
+        result = subprocess.run([sys.executable, "-c", _assemble_program(task, solution)],
+                                capture_output=True, timeout=timeout)
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 _TASK_FIELDS = ("domain", "tier", "schema_code", "tools_code", "instruction", "gold_solution", "verifier_code")
 
@@ -85,9 +147,11 @@ class GeneralAgentEnv(vf.MultiTurnEnv):
                  efficiency_weight: float, **kwargs):
         self._timeout = timeout
         rows = [{"question": _prompt(t), "answer": "", "info": t.to_dict()} for t in tasks]
+        ds = Dataset.from_list(rows)
         rubric = vf.Rubric(funcs=[self._reward_fn(max_turns, efficiency_weight), self._success_fn(max_turns)],
                            weights=[1.0, 0.0])
-        super().__init__(eval_dataset=Dataset.from_list(rows), rubric=rubric,
+        # dataset → RL training (prime train reads get_dataset()); eval_dataset → probe (prime eval run)
+        super().__init__(dataset=ds, eval_dataset=ds, rubric=rubric,
                          max_turns=max_turns, message_type="chat", **kwargs)
 
     @staticmethod

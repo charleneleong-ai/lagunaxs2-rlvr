@@ -12,11 +12,69 @@ long-horizon result. No sandbox — tests run in a local subprocess, so it's $0 
 """
 from __future__ import annotations
 
+import difflib
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+
 import verifiers as vf
 from datasets import Dataset, load_dataset
 
-from laguna_rlvr.code_exec import extract_code, score_code   # vendor before any Hub push
-from laguna_rlvr.rewards import RolloutState, agreement_score, diff_ratio, efficiency_bonus
+# --- vendored from src/laguna_rlvr: this env ships as a standalone Hub wheel and laguna_rlvr
+#     isn't a PyPI dep, so it can't be a requirement. Trimmed fork of just the subset used
+#     (code_exec + rewards) — not a byte-for-byte mirror of the source. ---
+_CODE_BLOCK = re.compile(r"```[a-zA-Z0-9_+\-]*\n(.*?)```", re.DOTALL)
+
+
+def extract_code(text: str) -> str:
+    """Pull the first fenced code block; fall back to the whole text."""
+    m = _CODE_BLOCK.search(text)
+    return (m.group(1) if m else text).strip()
+
+
+def score_code(code: str, tests: list[str], timeout: float = 5.0) -> tuple[int, int]:
+    """Return (passed, total): how many assert-tests the code satisfies, each in its own subprocess."""
+    passed = 0
+    for test in tests:
+        try:
+            result = subprocess.run([sys.executable, "-c", f"{code}\n{test}\n"],
+                                    capture_output=True, timeout=timeout)
+            passed += result.returncode == 0
+        except subprocess.TimeoutExpired:
+            pass
+    return passed, len(tests)
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutState:
+    tests_passed: int
+    tests_total: int
+    turns: int
+    max_turns: int
+    succeeded: bool
+
+
+def efficiency_bonus(s: RolloutState) -> float:
+    """Bounded [0, 1], decreasing in turns; zero unless succeeded — never pay for fast failure."""
+    if not s.succeeded or s.max_turns <= 0:
+        return 0.0
+    return max(0.0, 1.0 - s.turns / s.max_turns)
+
+
+def diff_ratio(before: str, after: str) -> float:
+    """Similarity of two code strings [0, 1]; 1.0 = identical (a minimal/surgical edit)."""
+    if not before and not after:
+        return 1.0
+    return difflib.SequenceMatcher(None, before, after).ratio()
+
+
+def agreement_score(self_passed: int, self_total: int, hidden_pass_fraction: float,
+                    min_tests: int = 2) -> float:
+    """How well the model's own tests track the hidden outcome [0, 1]; zero if < min_tests written."""
+    if self_total < min_tests:
+        return 0.0
+    return max(0.0, 1.0 - abs(self_passed / self_total - hidden_pass_fraction))
 
 # Deterministic single-edit mutations that tend to break behavior (no RNG — reproducible).
 _MUTATIONS = [("==", "!="), ("<=", ">"), (">=", "<"), (" < ", " > "), (" > ", " < "),
@@ -80,11 +138,13 @@ class AgenticRepairEnv(vf.MultiTurnEnv):
         self._timeout = timeout
         rows = [{"question": p, "answer": "", "info": {"tests": t, "setup": s, "buggy": b}}
                 for p, t, s, b in tasks]
+        ds = Dataset.from_list(rows)
         w = {**_DEFAULT_WEIGHTS, **(weights or {})}
         funcs = [self._correctness, self._efficiency_fn(max_turns), self._minimal_diff,
                  self._self_verify_fn(), self._success_fn()]
         weight_list = [w["correctness"], w["efficiency"], w["minimal_diff"], w["self_verify"], 0.0]
-        super().__init__(eval_dataset=Dataset.from_list(rows),
+        # dataset → RL training (prime train reads get_dataset()); eval_dataset → probe (prime eval run)
+        super().__init__(dataset=ds, eval_dataset=ds,
                          rubric=vf.Rubric(funcs=funcs, weights=weight_list),
                          max_turns=max_turns, message_type="chat", **kwargs)
 
