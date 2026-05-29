@@ -1,0 +1,7 @@
+module: agentic_repair
+args:
+  source: mbpp          # injected-bug MBPP (tier 1); swap to a real SWE env for tier 2
+  n_tasks: 20
+  max_turns: 8          # longer horizon than the function-from-scratch smoke env
+  timeout: 5.0
+  weights: { correctness: 1.0, efficiency: 0.1, minimal_diff: 0.1, self_verify: 0.0 }
