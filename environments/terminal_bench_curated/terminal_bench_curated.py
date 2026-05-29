@@ -33,7 +33,7 @@ import verifiers as vf
 
 
 # --- vendored reward math (mirror of src/laguna_finetune/rewards.py; kept inline for self-containment) ---
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)  # no slots= : robust when the env is loaded via a non-standard importer
 class RolloutState:
     tests_passed: int
     tests_total: int
