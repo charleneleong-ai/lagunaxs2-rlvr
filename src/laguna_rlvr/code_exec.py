@@ -18,6 +18,18 @@ def extract_code(text: str) -> str:
     return (m.group(1) if m else text).strip()
 
 
+def message_text(message) -> str:
+    """Text of a chat message — handles a str, a dict, or a verifiers pydantic Message (.content)."""
+    if isinstance(message, str):
+        return message
+    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):  # multimodal content parts
+        return "".join(p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "") for p in content)
+    return ""
+
+
 def score_code(code: str, tests: list[str], timeout: float = 5.0) -> tuple[int, int]:
     """Return (passed, total): how many assert-tests the code satisfies."""
     passed = 0

@@ -1,10 +1,10 @@
 """Task synthesizer: grow a verifiable general-agent corpus with an LLM, gated by self-consistency.
 
 The loop (the RLVR self-evolving engine): an LLM proposes a domain task (schema + tools + instruction
-+ gold + verifier); we KEEP it only if its gold solution drives its verifier to pass (`validate_task`,
-executed in a subprocess). Valid tasks are then *evolved* to higher tiers via the corpus's evolution
-strategies. Difficulty is calibrated against a gating solver — keep a tier only if its pass-rate sits
-in the learnable band (`report.rank`'s success-spread sweet spot), so the curriculum tracks the model.
++ gold + verifier); `build_corpus` KEEPS it only if its gold solution drives its verifier to pass
+(`validate_task`, executed in a subprocess), then *evolves* it to higher tiers via the evolution
+strategies. Difficulty calibration is a separate phase — the probe → `report.rank` step measures the
+solver's success-spread; `is_learnable` here is the same band check for when a live solver is on hand.
 
 `call_llm: prompt -> completion` is injected, so this is provider-agnostic (Ollama / Prime inference /
 OpenAI) and unit-testable with a fake. No keys, no network in the pure parsing/validation path.
@@ -98,7 +98,7 @@ def build_corpus(call_llm: Callable[[str], str], domains: list[str], tiers: int 
                  timeout: float = 5.0) -> list[Task]:
     """Synthesize a tier-0 task per domain, then evolve each up `tiers` levels — all self-consistent."""
     corpus: list[Task] = []
-    for i, domain in enumerate(domains):
+    for domain in domains:
         task = synthesize(call_llm, domain_hint=domain, tier=0, timeout=timeout)
         if task is None:
             continue

@@ -15,7 +15,7 @@ from __future__ import annotations
 import verifiers as vf
 from datasets import Dataset, load_dataset
 
-from laguna_rlvr.code_exec import extract_code, score_code   # vendor before any Hub push
+from laguna_rlvr.code_exec import extract_code, message_text, score_code   # vendor before any Hub push
 from laguna_rlvr.rewards import RolloutState, agreement_score, diff_ratio, efficiency_bonus
 
 # Deterministic single-edit mutations that tend to break behavior (no RNG — reproducible).
@@ -59,17 +59,6 @@ def _load_repair_tasks(source: str, n_tasks: int | None, start: int, timeout: fl
         tasks.append((f"{spec}\n\nThis implementation is buggy:\n```python\n{buggy}\n```{_REPLY}",
                       tests, setup, buggy))
     return tasks
-
-
-def _text(message) -> str:
-    if isinstance(message, str):
-        return message
-    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "") for p in content)
-    return ""
 
 
 _DEFAULT_WEIGHTS = {"correctness": 1.0, "efficiency": 0.1, "minimal_diff": 0.1, "self_verify": 0.0}
@@ -134,7 +123,7 @@ class AgenticRepairEnv(vf.MultiTurnEnv):
     async def env_response(self, messages, state, **kwargs):
         info = state["info"]
         setup, tests = info.get("setup", ""), info["tests"]
-        code = extract_code(_text(messages[-1]))
+        code = extract_code(message_text(messages[-1]))
         state["last_code"] = code
         program = f"{setup}\n{code}" if setup else code
         failed = [t for t in tests if score_code(program, [t], self._timeout)[0] == 0]

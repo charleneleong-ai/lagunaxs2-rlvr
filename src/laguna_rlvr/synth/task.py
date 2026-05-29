@@ -42,14 +42,23 @@ def assemble_program(task: Task, solution: str | None = None) -> str:
                         task.verifier_code, _HARNESS])
 
 
+def run_capturing(task: Task, solution: str | None = None, timeout: float = 5.0) -> tuple[bool, str]:
+    """Run the solution once; return (verifier_passed, captured stdout+stderr).
+
+    One subprocess yields both the score (verify() harness exit code) and the agent's observation
+    (whatever the tool calls printed) — so a multi-turn env needn't run the program twice per turn.
+    """
+    try:
+        r = subprocess.run([sys.executable, "-c", assemble_program(task, solution)],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, (r.stdout + r.stderr)
+    except subprocess.TimeoutExpired:
+        return False, "(timed out)"
+
+
 def run_solution(task: Task, solution: str | None = None, timeout: float = 5.0) -> bool:
     """True iff the solution drives the task's verifier to pass (subprocess-isolated)."""
-    try:
-        result = subprocess.run([sys.executable, "-c", assemble_program(task, solution)],
-                                capture_output=True, timeout=timeout)
-        return result.returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
+    return run_capturing(task, solution, timeout)[0]
 
 
 def validate_task(task: Task, timeout: float = 5.0) -> bool:
