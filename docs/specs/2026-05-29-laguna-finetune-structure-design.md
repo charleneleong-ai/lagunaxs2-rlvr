@@ -115,6 +115,13 @@ Two asserted decisions:
 - More than two candidate domains.
 - ARC-AGI-3 env — text-only modality risk + ~0.51% frontier ceiling (zero-gradient trap).
 
+## Implementation notes (2026-05-29)
+
+- **Env API has two generations.** Classic `verifiers` (`MultiTurnEnv`/`Rubric`, local Docker) vs `verifiers.v1` + Harbor (official `primeintellect/terminal-bench-2`, TB-2.1, **hosted `prime-sandboxes` only** — `prime_sandboxes` is an httpx client to Prime's API, no local Docker backend). The orchestration layer is API-agnostic (shells out to `prime`), so the choice only affects env modules.
+- **`terminal_bench_curated` is built on the classic local-Docker path** (forked from community `ibrahim/terminal-bench`, MIT) so it runs **credit-free locally** pre-event. Two changes vs upstream: store per-test `tests_passed`/`tests_total` in state (real success key is `terminalbench_is_resolved`), and a shaped partial-credit reward + curated `task_ids`. Event-time upgrade path: port the same curation + a `shaped_harbor_reward` `CallableEntry` (parsing `state["harbor_tests"]["stdout"]`) to the v1/Harbor `terminal-bench-2` for a blessed TB-2.1 run on sponsored sandboxes.
+- **Envs are self-contained** (vendor the reward math; declare their own deps) because `prime eval run` resolves the env as an *installed package* (`prime env install <path>` first) — they can't rely on importing the parent `src/` package.
+- **Wallet is $0 pre-event**; iterate via `--provider anthropic` (your Anthropic bill, tiny) or local Docker. `--provider prime` / hosted sandboxes wait for sponsored event compute. Username unset → set before `prime env push`.
+
 ## References
 
 - Setup: [lab-cookbook](https://github.com/PrimeIntellect-ai/lab-cookbook) (guides 00-setup, 02-building-your-first-environment, 03-training-with-rl, 10-coding-agents-and-sandboxes), hackathon repo [poolside-primeintellect](https://github.com/poolside-primeintellect/poolside-primeintellect).

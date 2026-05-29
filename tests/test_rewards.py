@@ -56,10 +56,9 @@ def test_binary(succeeded, expected):
 
 
 class TestMakeScorer:
-    _STATE = {"tests_passed": 5, "tests_total": 10, "turn": 0, "succeeded": True}
-
     def test_binary_fn_ignores_partial(self):
-        assert make_scorer("binary", max_turns=50)(self._STATE) == 1.0
+        assert make_scorer("binary")(_state(passed=5, total=10, succeeded=True)) == 1.0
 
     def test_shaped_fn_uses_partial_plus_efficiency(self):
-        assert make_scorer("shaped", max_turns=50, efficiency_weight=0.1)(self._STATE) == pytest.approx(0.5 + 0.1)
+        s = _state(passed=5, total=10, turns=0, max_turns=50, succeeded=True)
+        assert make_scorer("shaped", efficiency_weight=0.1)(s) == pytest.approx(0.5 + 0.1)

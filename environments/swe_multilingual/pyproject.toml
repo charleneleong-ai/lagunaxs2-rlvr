@@ -1,9 +1,9 @@
 [project]
 name = "swe-multilingual"
-description = "Your environment description here"
-tags = ["placeholder-tag", "train", "eval"]
+description = "Per-language SWE env targeting Laguna's multilingual headroom (deferred stub)."
+tags = ["swe", "multilingual", "eval", "train"]
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "verifiers>=0.1.14",
 ]

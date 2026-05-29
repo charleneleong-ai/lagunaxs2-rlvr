@@ -1,0 +1,7 @@
+# Gemini via OpenRouter (no native 'gemini' provider). Set OPENROUTER_API_KEY.
+# Billed to your OpenRouter account. For a custom base URL instead, set provider: openai + api_base_url.
+name: google/gemini-2.5-flash
+slug: gemini25flash
+provider: openrouter
+max_tokens: 4096
+temperature: 0.7

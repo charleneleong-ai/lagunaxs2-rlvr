@@ -1,4 +1,0 @@
-module: terminal_bench_curated
-args:
-  split: curated_easy   # difficulty-filtered subset where Laguna has nonzero base rate
-  max_turns: 50
