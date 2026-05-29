@@ -28,6 +28,24 @@ Other gotchas hit: `prime env install` is broken (emits `--exclude-newer-package
 2. **Real TB result at the event: official `terminal-bench-2` + a reward `CallableEntry`.** Don't fork — add `shaped_harbor_reward` (parses `state["harbor_tests"]["stdout"]` → pass fraction) via config, run on sponsored sandboxes. Minimal code.
 3. **Local TB (if truly needed): vendor popfido's `DockerExecutor`, write fresh 0.1.14 glue.** ~400 lines, only fully testable via Docker. Highest effort; defer unless local TB is essential.
 
+## Running the official `terminal-bench-2` (path 2, once credit lands)
+
+Validated technically (Terminus2/Harbor import on `verifiers==0.1.15.dev11`); blocked only on wallet credit.
+
+```bash
+# 1. Put credit on the Prime wallet (hosted sandboxes bill compute).
+# 2. v1/Harbor needs the dev verifiers — pin it in pyproject so `uv run` won't revert it:
+uv pip install --prerelease=allow "verifiers>=0.1.15.dev11"
+# 3. prime env install is broken (emits an invalid --exclude-newer-package); pull + editable-install:
+prime env pull primeintellect/terminal-bench-2
+uv pip install -e <pulled-dir>
+# 4. Agent can be local Ollama (free); only the sandbox bills credit:
+export OLLAMA_API_KEY=ollama
+prime eval run terminal_bench_2 --provider openai -m qwen3:8b \
+  -b http://localhost:11434/v1 -k OLLAMA_API_KEY -n 1 -r 1
+```
+Caveat: its `load_environment(config: vf.EnvConfig, *, max_turns)` takes a structured config, not our probe's `--env-args` kwargs — run it directly first, then wire a `conf/env/terminal_bench_2.yaml` + probe adapter. Our partial-credit contribution there = a `shaped_harbor_reward` `CallableEntry` parsing `state["harbor_tests"]["stdout"]`.
+
 ## Status
 
 `environments/terminal_bench_curated/` was **removed** (commit after 8237355) — it forked the stale ibrahim API and can't run on 0.1.14. The reward/curation logic lives on in `src/laguna_finetune/rewards.py` (+ tests). Pursue path 1 (no-Docker env) or path 2 (official v1 Harbor + reward `CallableEntry`).
