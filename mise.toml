@@ -51,3 +51,7 @@ run = "prime train configs/rl/laguna-xs2.toml"
 [tasks.mm-adapter-plan]
 description = "Dry-run the A100 40GB generalized adapter scaffold"
 run = "uv run python scripts/mm_adapter_plan.py configs/mm_adapter/a100-40gb-projector.toml"
+
+[tasks.eval]
+description = "Eval an env on hosted Laguna XS.2 via Prime inference. Args: <env> [extra flags], e.g. `mise run eval -- ocr_tool -n 4`"
+run = "uv run prime eval run --provider prime -m poolside/laguna-xs.2"
