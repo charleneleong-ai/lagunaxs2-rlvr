@@ -6,25 +6,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class RolloutState:
-    """A single rollout's outcome, normalized for shaping."""
+    """A single rollout's outcome, normalized for shaping. Each env maps its own harness
+    State keys to this (the keys differ per harness, so the mapping lives in the env)."""
 
     tests_passed: int
     tests_total: int
     turns: int
     max_turns: int
     succeeded: bool
-
-    @classmethod
-    def from_state(cls, state, max_turns: int) -> "RolloutState":
-        # TODO(event): the single integration contract — map the live verifiers State
-        # keys here once a harness surfaces per-test results; both envs go through this.
-        return cls(
-            tests_passed=int(state.get("tests_passed", 0)),
-            tests_total=int(state.get("tests_total", 0)),
-            turns=int(state.get("turn", 0)),
-            max_turns=max_turns,
-            succeeded=bool(state.get("succeeded", False)),
-        )
 
 
 def binary(s: RolloutState) -> float:
@@ -49,9 +38,8 @@ def shaped(s: RolloutState, efficiency_weight: float = 0.1) -> float:
     return partial_credit(s) + efficiency_weight * efficiency_bonus(s)
 
 
-def make_scorer(fn: str, max_turns: int, efficiency_weight: float = 0.1):
-    """Build a verifiers reward func from a config-selected shaping fn. Pure — no verifiers import."""
-    def score(state) -> float:
-        s = RolloutState.from_state(state, max_turns)
+def make_scorer(fn: str, efficiency_weight: float = 0.1):
+    """Select a shaping fn by config name. Operates on a RolloutState the env has built."""
+    def score(s: RolloutState) -> float:
         return binary(s) if fn == "binary" else shaped(s, efficiency_weight)
     return score
