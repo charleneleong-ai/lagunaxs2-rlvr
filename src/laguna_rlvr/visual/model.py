@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from laguna_rlvr.visual.encoders import Encoder
 from laguna_rlvr.visual.projector import Projector
@@ -32,8 +32,16 @@ class VisualAdapter(nn.Module):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = dtype or (torch.bfloat16 if self.device.startswith("cuda") else torch.float32)
         self.encoder = encoder
-        self.tok = AutoTokenizer.from_pretrained(base_llm)
-        self.llm = AutoModelForCausalLM.from_pretrained(base_llm, dtype=dtype).to(self.device)
+        self.tok = AutoTokenizer.from_pretrained(base_llm, trust_remote_code=True)
+        # Quantized checkpoints (e.g. Laguna NVFP4) carry their own dtype + placement: load via
+        # device_map and don't override dtype or call .to(). Plain checkpoints take the explicit path.
+        cfg = AutoConfig.from_pretrained(base_llm, trust_remote_code=True)
+        if getattr(cfg, "quantization_config", None) is not None:
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                base_llm, trust_remote_code=True, device_map=self.device)
+        else:
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                base_llm, trust_remote_code=True, dtype=dtype).to(self.device)
         self.llm.eval()
         for p in self.llm.parameters():
             p.requires_grad_(False)
