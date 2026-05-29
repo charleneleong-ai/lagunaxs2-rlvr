@@ -29,18 +29,29 @@ _BUILTIN_TASKS = [
 ]
 
 
-def _load_tasks(source: str, n_tasks: int | None, start: int) -> list[tuple[str, list[str], str]]:
+def _load_tasks(source: str, n_tasks: int | None, start: int,
+                prompt_field: str = "prompt", tests_field: str = "tests",
+                setup_field: str = "setup") -> list[tuple[str, list[str], str]]:
+    """Load (prompt, tests, setup) triples.
+
+    source: 'builtin' (offline toys) · 'mbpp' · any HF dataset id ('owner/name' or 'hf:owner/name:split').
+    For an Adaption-exported HF dataset, the default fields (prompt/tests/setup) match its schema;
+    override prompt_field/tests_field/setup_field for other layouts.
+    """
     if source == "builtin":
         return _BUILTIN_TASKS
     if source == "mbpp":
         ds = load_dataset("google-research-datasets/mbpp", "full", split="test")  # 500 tasks, each with asserts
-        end = len(ds) if not n_tasks else min(start + n_tasks, len(ds))
-        tasks = []
-        for r in ds.select(range(start, end)):
-            prompt = (r.get("text") or r.get("prompt") or "").strip()
-            tasks.append((prompt + _REPLY, list(r["test_list"]), r.get("test_setup_code") or ""))
-        return tasks
-    raise ValueError(f"unknown task source {source!r} (use 'mbpp' or 'builtin')")
+        prompt_field, tests_field, setup_field = "text", "test_list", "test_setup_code"
+    else:
+        ds_id, _, split = source.removeprefix("hf:").partition(":")  # 'hf:owner/name:split' or 'owner/name'
+        ds = load_dataset(ds_id, split=split or "train")
+    end = len(ds) if not n_tasks else min(start + n_tasks, len(ds))
+    tasks = []
+    for r in ds.select(range(start, end)):
+        prompt = (r.get(prompt_field) or "").strip()
+        tasks.append((prompt + _REPLY, list(r.get(tests_field) or []), r.get(setup_field) or ""))
+    return tasks
 
 
 def _text(message) -> str:
@@ -113,7 +124,9 @@ class CodeRepairEnv(vf.MultiTurnEnv):
 
 
 def load_environment(source: str = "mbpp", n_tasks: int | None = 20, start: int = 0,
+                     prompt_field: str = "prompt", tests_field: str = "tests", setup_field: str = "setup",
                      max_turns: int = 5, timeout: float = 5.0,
                      fn: str = "shaped", efficiency_weight: float = 0.1, **kwargs) -> vf.Environment:
-    return CodeRepairEnv(_load_tasks(source, n_tasks, start), max_turns=max_turns, timeout=timeout,
+    tasks = _load_tasks(source, n_tasks, start, prompt_field, tests_field, setup_field)
+    return CodeRepairEnv(tasks, max_turns=max_turns, timeout=timeout,
                          fn=fn, efficiency_weight=efficiency_weight)
