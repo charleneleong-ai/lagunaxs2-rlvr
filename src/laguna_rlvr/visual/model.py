@@ -9,7 +9,8 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from laguna_rlvr.visual.encoders import Encoder
 from laguna_rlvr.visual.projector import Projector
 
-_PROMPT = "Transcribe the text in the image:"
+IMAGE_TOKEN = "<image>"
+_PROMPT = f"{IMAGE_TOKEN}\nTranscribe the text in the image:"
 
 
 @dataclass
@@ -69,6 +70,7 @@ class VisualAdapter(nn.Module):
         if "dtype" in load_kwargs:  # plain checkpoint: move to device (quantized self-places)
             self.llm = self.llm.to(self.device)
         _assert_backbone_loaded(self.llm, info["missing_keys"], base_llm)
+        self._add_image_token()  # <image> marker + subtoken-avg init, before the freeze below
         self.llm.eval()
         for p in self.llm.parameters():
             p.requires_grad_(False)
@@ -84,23 +86,47 @@ class VisualAdapter(nn.Module):
     def trainable_parameters(self):
         return self.projector.parameters()
 
-    def _embed(self, text: str) -> torch.Tensor:
+    def _add_image_token(self) -> None:
+        """Add an <image> placeholder token, embedding-initialized as the mean of its subtoken
+        embeddings — Laguna's new-token recipe (§4.1.1: subtoken-averaged init + frozen warmup).
+
+        We keep it frozen (the projector carries the learning). The token marks where projected
+        vision tokens are spliced into the sequence (see `_embed_with_vision`), which is what lets
+        vision arrive as a tool observation anywhere in the chat template, not only as a prefix.
+        """
+        if IMAGE_TOKEN in self.tok.get_vocab():
+            self.image_token_id = self.tok.convert_tokens_to_ids(IMAGE_TOKEN)
+            return
+        sub_ids = self.tok(IMAGE_TOKEN, add_special_tokens=False).input_ids  # before it's atomic
+        self.tok.add_special_tokens({"additional_special_tokens": [IMAGE_TOKEN]})
+        self.image_token_id = self.tok.convert_tokens_to_ids(IMAGE_TOKEN)
+        self.llm.resize_token_embeddings(len(self.tok))
+        emb = self.llm.get_input_embeddings().weight.data
+        emb[self.image_token_id] = emb[sub_ids].mean(dim=0)
+
+    def _embed_with_vision(self, text: str, vis: torch.Tensor) -> torch.Tensor:
+        """Embed `text` (containing one <image>) and splice the `vis` tokens in at that position.
+
+        vis: (1, Nv, D). Returns (1, T-1+Nv, D) — the <image> slot is replaced by the Nv vision tokens.
+        """
         ids = self.tok(text, return_tensors="pt").input_ids.to(self.llm.device)
-        return self.llm.get_input_embeddings()(ids)  # (1, T, D)
+        embeds = self.llm.get_input_embeddings()(ids)  # (1, T, D)
+        pos = (ids[0] == self.image_token_id).nonzero(as_tuple=True)[0]
+        if len(pos) != 1:
+            raise ValueError(f"expected exactly one {IMAGE_TOKEN} in prompt, found {len(pos)}")
+        i = int(pos[0])
+        return torch.cat([embeds[:, :i], vis.to(embeds.dtype), embeds[:, i + 1 :]], dim=1)
 
     def forward(self, images: list, labels: list[str]) -> Output:
         feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
         vis = self.projector(feats)  # (B, Nv, D)
         losses = []
         for b, label in enumerate(labels):
-            prompt_e = self._embed(_PROMPT)  # (1, Tp, D)
+            prompt_e = self._embed_with_vision(_PROMPT, vis[b : b + 1])  # vision spliced at <image>
             label_ids = self.tok(label, return_tensors="pt").input_ids.to(self.llm.device)
             label_e = self.llm.get_input_embeddings()(label_ids)
-            v = vis[b : b + 1]  # (1, Nv, D)
-            inputs = torch.cat([v, prompt_e, label_e], dim=1)
-            mask = torch.full(
-                (1, v.shape[1] + prompt_e.shape[1]), -100, device=self.llm.device
-            )
+            inputs = torch.cat([prompt_e, label_e], dim=1)
+            mask = torch.full((1, prompt_e.shape[1]), -100, device=self.llm.device)
             tgt = torch.cat([mask, label_ids], dim=1)
             losses.append(self.llm(inputs_embeds=inputs, labels=tgt).loss)
         return Output(loss=torch.stack(losses).mean())
@@ -112,7 +138,7 @@ class VisualAdapter(nn.Module):
         vis = self.projector(feats)
         out = []
         for b in range(len(images)):
-            inputs = torch.cat([vis[b : b + 1], self._embed(_PROMPT)], dim=1)
+            inputs = self._embed_with_vision(_PROMPT, vis[b : b + 1])
             gen = self.llm.generate(inputs_embeds=inputs, max_new_tokens=max_new_tokens, do_sample=False)
             out.append(self.tok.decode(gen[0], skip_special_tokens=True))
         return out
