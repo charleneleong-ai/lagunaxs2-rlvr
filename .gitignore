@@ -15,4 +15,5 @@ wandb/
 
 # Env / secrets
 .env
+!.env.example
 *.local

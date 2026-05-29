@@ -19,3 +19,23 @@ run = [
 [tasks.login]
 description = "Authenticate the Prime CLI (interactive — opens browser)"
 run = "prime login"
+
+[tasks.test]
+description = "Run the test suite"
+run = "uv run pytest -q"
+
+[tasks.probe]
+description = "Probe a model on an env. Args after --, e.g. `mise run probe -- env=code_smoke model=ollama`"
+run = "uv run python -m laguna_finetune.probe"
+
+[tasks.report]
+description = "Rank probe results by learnable signal -> results/probe/ranking.{md,png}"
+run = "uv run python -m laguna_finetune.report"
+
+[tasks.verify-seed]
+description = "Check every Adaption seed row is verifiable (ref passes all tests, empty stub fails)"
+run = "uv run python scripts/verify_seed.py docs/adaption/seed_multilingual_coding.jsonl"
+
+[tasks.train]
+description = "Launch the free hosted Laguna RL run from the toml config"
+run = "prime train configs/rl/laguna-xs2.toml"
