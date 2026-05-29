@@ -77,3 +77,15 @@ class VisualAdapter(nn.Module):
             tgt = torch.cat([mask, label_ids], dim=1)
             losses.append(self.llm(inputs_embeds=inputs, labels=tgt).loss)
         return Output(loss=torch.stack(losses).mean())
+
+    @torch.no_grad()
+    def transcribe(self, images: list, max_new_tokens: int = 48) -> list[str]:
+        """Greedy-decode the LLM's reading of each image (vision tokens + prompt) for eval."""
+        feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
+        vis = self.projector(feats)
+        out = []
+        for b in range(len(images)):
+            inputs = torch.cat([vis[b : b + 1], self._embed(_PROMPT)], dim=1)
+            gen = self.llm.generate(inputs_embeds=inputs, max_new_tokens=max_new_tokens, do_sample=False)
+            out.append(self.tok.decode(gen[0], skip_special_tokens=True))
+        return out
