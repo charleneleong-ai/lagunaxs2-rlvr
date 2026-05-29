@@ -1,0 +1,17 @@
+# Real Laguna XS.2, self-served on your own A100-40GB behind an OpenAI-compatible endpoint.
+# Bypasses Prime inference-gating + per-token cost.
+#
+# Serve it one of two ways on the A100, then point this at it:
+#   vLLM    : vllm serve poolside/Laguna-XS.2-NVFP4 --port 8000 --max-model-len 32768
+#             -> name below stays poolside/Laguna-XS.2-NVFP4
+#   Ollama  : ollama pull laguna-xs.2   (serves :11434/v1)
+#             -> set name: laguna-xs.2  and LAGUNA_VLLM_URL=http://<host>:11434/v1
+#
+# export LAGUNA_VLLM_URL=http://<a100-host>:8000/v1 ; export VLLM_API_KEY=<any-non-empty>
+name: poolside/Laguna-XS.2-NVFP4
+slug: laguna_vllm
+provider: openai
+api_base_url: ${oc.env:LAGUNA_VLLM_URL,http://localhost:8000/v1}
+api_key_var: VLLM_API_KEY
+max_tokens: 4096
+temperature: 0.7
