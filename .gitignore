@@ -10,6 +10,10 @@ __pycache__/
 # Experiment artefacts (regenerated)
 results/
 logs/
+# results.jsonl / current_run.json / progress.html are regenerated; keep committed progress PNGs
+experiments/
+!experiments/progress/
+!experiments/progress/**
 # Hydra default run dir
 outputs/
 wandb/

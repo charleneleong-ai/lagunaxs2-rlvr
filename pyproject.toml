@@ -19,6 +19,7 @@ dependencies = [
     "transformers>=5.9.0",
     "pillow>=12.2.0",
     "httpx>=0.28.1",
+    "autoresearch",
 ]
 
 [dependency-groups]
@@ -33,3 +34,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/laguna_rlvr"]
+
+[tool.uv.sources]
+autoresearch = { path = "../autoresearch" }

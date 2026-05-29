@@ -17,6 +17,30 @@ class Output:
     loss: torch.Tensor
 
 
+def _assert_backbone_loaded(model: nn.Module, missing_keys: list[str], base_llm: str) -> None:
+    """Raise if real pretrained weights were missing from the checkpoint and randomly initialized.
+
+    Non-persistent buffers (e.g. rotary inv_freq) are recomputed at init and legitimately absent;
+    anything else missing means the "frozen" backbone is partly noise — e.g. NVFP4-packed MoE
+    experts that compressed-tensors can't map onto this modeling revision's fused expert params
+    (caught on feat/mm-adapter, 2026-05). Use the model's own non-persistent-buffer registry rather
+    than a name denylist so the check generalizes across architectures.
+    """
+    benign = {
+        f"{mod}.{buf}" if mod else buf
+        for mod, m in model.named_modules()
+        for buf in m._non_persistent_buffers_set
+    }
+    real = [k for k in missing_keys if k not in benign]
+    if real:
+        keys = "\n  ".join(real[:8] + (["..."] if len(real) > 8 else []))
+        raise RuntimeError(
+            f"{base_llm}: {len(real)} backbone weights missing from the checkpoint and randomly "
+            f"initialized — the frozen backbone would be partly noise. Use a checkpoint whose layout "
+            f"matches this modeling revision (e.g. the unquantized base). Missing:\n  {keys}"
+        )
+
+
 class VisualAdapter(nn.Module):
     """Frozen encoder + trainable projector + frozen causal LLM. Trains the projector only."""
 
@@ -36,12 +60,15 @@ class VisualAdapter(nn.Module):
         # Quantized checkpoints (e.g. Laguna NVFP4) carry their own dtype + placement: load via
         # device_map and don't override dtype or call .to(). Plain checkpoints take the explicit path.
         cfg = AutoConfig.from_pretrained(base_llm, trust_remote_code=True)
+        load_kwargs = {"trust_remote_code": True, "output_loading_info": True}
         if getattr(cfg, "quantization_config", None) is not None:
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                base_llm, trust_remote_code=True, device_map=self.device)
+            load_kwargs["device_map"] = self.device
         else:
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                base_llm, trust_remote_code=True, dtype=dtype).to(self.device)
+            load_kwargs["dtype"] = dtype
+        self.llm, info = AutoModelForCausalLM.from_pretrained(base_llm, **load_kwargs)
+        if "dtype" in load_kwargs:  # plain checkpoint: move to device (quantized self-places)
+            self.llm = self.llm.to(self.device)
+        _assert_backbone_loaded(self.llm, info["missing_keys"], base_llm)
         self.llm.eval()
         for p in self.llm.parameters():
             p.requires_grad_(False)
