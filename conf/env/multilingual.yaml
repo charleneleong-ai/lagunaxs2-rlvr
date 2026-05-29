@@ -1,4 +1,12 @@
-module: swe_multilingual
+# Non-English coding tasks (Adaption-exported) — targets Laguna's multilingual headroom
+# (57.7% SWE-bench Multilingual vs 69.9% Verified). Runs through the code_smoke repair env.
+# Swap `source` to your adapted dataset once Adaption exports it; until then it falls back to the seed.
+module: code_smoke
 args:
-  langs: [go, rust, typescript]   # poolside's reported headroom: 57.7% multilingual vs 69.9% Verified
-  max_turns: 50
+  source: hf:chaleong/laguna-multilingual-coding-seed   # -> hf:chaleong/laguna-multilingual-coding after Adaption
+  n_tasks: 50            # sample for the probe; set null to load all for training
+  max_turns: 5
+  timeout: 5.0
+  # prompt/tests/setup field names default to the Adaption schema; override here if the export differs.
+  # fn + efficiency_weight are merged in from the reward config group by probe.py.
+  # Private dataset → needs HF auth: export HF_TOKEN locally, or set an HF-token secret on Prime for hosted training.
