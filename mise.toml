@@ -1,0 +1,21 @@
+[tools]
+python = "3.12"
+uv = "latest"
+
+[tasks.setup]
+description = "Install project deps and the Prime Intellect CLI"
+run = [
+  "uv sync",
+  "uv tool install prime --force",
+]
+
+[tasks.doctor]
+description = "Verify the toolchain is ready"
+run = [
+  "uv --version",
+  "prime --version",
+]
+
+[tasks.login]
+description = "Authenticate the Prime CLI (interactive — opens browser)"
+run = "prime login"

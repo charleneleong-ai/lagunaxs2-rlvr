@@ -1,0 +1,3 @@
+# A short Laguna run to validate config + reward direction before any larger run.
+config: configs/rl/laguna_small.toml   # prime-rl config, authored at the event
+max_steps: 200

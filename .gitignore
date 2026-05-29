@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# uv / mise
+.mise.local.toml
+
+# Experiment artefacts (regenerated)
+results/
+# Hydra default run dir
+outputs/
+wandb/
+
+# Env / secrets
+.env
+*.local

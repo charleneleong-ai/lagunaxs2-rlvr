@@ -1,0 +1,24 @@
+[project]
+name = "laguna-finetune"
+version = "0.1.0"
+description = "Laguna XS.2 finetune — Hydra-orchestrated probe + RL on Prime Intellect"
+requires-python = ">=3.11"
+dependencies = [
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+    "wandb>=0.17",
+    "verifiers>=0.1.14",
+    "datasets>=2.19",
+    "pandas>=2.2",
+    "matplotlib>=3.8",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/laguna_finetune"]

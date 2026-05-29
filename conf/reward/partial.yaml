@@ -1,0 +1,2 @@
+fn: shaped          # test-pass fraction + efficiency nudge — dense signal for a small model
+efficiency_weight: 0.1
