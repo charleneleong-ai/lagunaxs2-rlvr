@@ -1,8 +1,8 @@
 module: terminal_bench_curated
 args:
   dataset: terminal-bench-core
-  dataset_version: head
-  n_tasks: 3            # small subset for the first local run; curate via task_ids once probed
-  max_turns: 30
+  dataset_version: 0.1.1
+  task_ids: [fix-git]   # lightweight smoke task; broaden / curate by base-rate once probed
+  max_turns: 15
   cleanup: true         # remove Docker containers after each task
   # fn + efficiency_weight are merged in from the reward config group by probe.py
