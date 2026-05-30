@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -16,6 +16,14 @@ _PROMPT = f"{IMAGE_TOKEN}\nTranscribe the text in the image:"
 @dataclass
 class Output:
     loss: torch.Tensor
+
+
+@dataclass
+class Turn:
+    """One user turn of a multimodal conversation: text (with `<image>` markers) + its images."""
+
+    text: str
+    images: list = field(default_factory=list)
 
 
 def _assert_backbone_loaded(model: nn.Module, missing_keys: list[str], base_llm: str) -> None:
@@ -104,22 +112,36 @@ class VisualAdapter(nn.Module):
         emb = self.llm.get_input_embeddings().weight.data
         emb[self.image_token_id] = emb[sub_ids].mean(dim=0)
 
-    def _embed_with_vision(self, text: str, vis: torch.Tensor) -> torch.Tensor:
-        """Embed `text` (containing one <image>) and splice the `vis` tokens in at that position.
+    def _embed_multi(self, text: str, vis_list: list[torch.Tensor]) -> torch.Tensor:
+        """Embed `text` and splice one vision-token group per `<image>` marker, in order.
 
-        vis: (1, Nv, D). Returns (1, T-1+Nv, D) — the <image> slot is replaced by the Nv vision tokens.
+        vis_list: list of (1, Nv, D), one per marker. Supports 0 markers (text-only turn) up to N,
+        which is what lets vision arrive across multiple conversation turns, not only as a prefix.
         """
         ids = self.tok(text, return_tensors="pt").input_ids.to(self.llm.device)
         embeds = self.llm.get_input_embeddings()(ids)  # (1, T, D)
-        pos = (ids[0] == self.image_token_id).nonzero(as_tuple=True)[0]
-        if len(pos) != 1:
-            raise ValueError(f"expected exactly one {IMAGE_TOKEN} in prompt, found {len(pos)}")
-        i = int(pos[0])
-        return torch.cat([embeds[:, :i], vis.to(embeds.dtype), embeds[:, i + 1 :]], dim=1)
+        pos = (ids[0] == self.image_token_id).nonzero(as_tuple=True)[0].tolist()
+        if len(pos) != len(vis_list):
+            raise ValueError(f"{len(pos)} {IMAGE_TOKEN} markers but {len(vis_list)} image groups")
+        if not pos:
+            return embeds
+        parts, prev = [], 0
+        for p, vis in zip(pos, vis_list):
+            parts += [embeds[:, prev:p], vis.to(embeds.dtype)]
+            prev = p + 1
+        parts.append(embeds[:, prev:])
+        return torch.cat(parts, dim=1)
+
+    def _embed_with_vision(self, text: str, vis: torch.Tensor) -> torch.Tensor:
+        """Single-image splice — `text` must contain exactly one <image>. See `_embed_multi`."""
+        return self._embed_multi(text, [vis])
+
+    def _project(self, images: list) -> torch.Tensor:
+        feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
+        return self.projector(feats)  # (B, Nv, D)
 
     def forward(self, images: list, labels: list[str]) -> Output:
-        feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
-        vis = self.projector(feats)  # (B, Nv, D)
+        vis = self._project(images)  # (B, Nv, D)
         losses = []
         for b, label in enumerate(labels):
             prompt_e = self._embed_with_vision(_PROMPT, vis[b : b + 1])  # vision spliced at <image>
@@ -134,11 +156,35 @@ class VisualAdapter(nn.Module):
     @torch.no_grad()
     def transcribe(self, images: list, max_new_tokens: int = 48) -> list[str]:
         """Greedy-decode the LLM's reading of each image (vision tokens + prompt) for eval."""
-        feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
-        vis = self.projector(feats)
+        vis = self._project(images)
         out = []
         for b in range(len(images)):
             inputs = self._embed_with_vision(_PROMPT, vis[b : b + 1])
             gen = self.llm.generate(inputs_embeds=inputs, max_new_tokens=max_new_tokens, do_sample=False)
             out.append(self.tok.decode(gen[0], skip_special_tokens=True))
         return out
+
+    @torch.no_grad()
+    def chat(self, turns: list[Turn], max_new_tokens: int = 48) -> list[str]:
+        """Multi-turn multimodal QA: generate an assistant reply per turn, conditioned on all prior
+        turns + their images. Each turn's `<image>` markers are filled by that turn's images (0..N),
+        so vision arrives across turns — the agentic, tool-observation-style use, not a fixed prefix.
+        """
+        self.llm.gradient_checkpointing_disable()  # generation only — no backward to checkpoint for
+        try:
+            ctx, replies = None, []
+            for turn in turns:
+                vis_list = []
+                if turn.images:
+                    proj = self._project(turn.images)
+                    vis_list = [proj[b : b + 1] for b in range(len(turn.images))]
+                turn_e = self._embed_multi(turn.text, vis_list)
+                ctx = turn_e if ctx is None else torch.cat([ctx, turn_e], dim=1)
+                reply_ids = self.llm.generate(
+                    inputs_embeds=ctx, max_new_tokens=max_new_tokens, do_sample=False)
+                replies.append(self.tok.decode(reply_ids[0], skip_special_tokens=True))
+                ctx = torch.cat([ctx, self.llm.get_input_embeddings()(reply_ids)], dim=1)
+            return replies
+        finally:
+            self.llm.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False})
