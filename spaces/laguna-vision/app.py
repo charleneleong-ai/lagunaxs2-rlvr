@@ -16,25 +16,28 @@ from pathlib import Path
 
 import gradio as gr
 import torch
+from huggingface_hub import hf_hub_download
 from PIL import Image
 
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.model import IMAGE_TOKEN, Turn, VisualAdapter
 
 BASE = os.environ.get("LAGUNA_BASE", "poolside/Laguna-XS.2")
-PROJECTOR = os.environ.get("LAGUNA_PROJECTOR", "results/visual/glm_ocr__Laguna-XS.2__mix/best.pt")
+PROJECTOR = os.environ.get("LAGUNA_PROJECTOR", "chaleong/laguna-xs2-multimodal")
 ENCODER = os.environ.get("LAGUNA_ENCODER", "glm_ocr")
 POOL = int(os.environ.get("LAGUNA_POOL", "4"))
 MAX_TOKENS = int(os.environ.get("LAGUNA_MAX_TOKENS", "256"))
 
 
 def _resolve_projector(ref: str) -> str:
-    """A local path, else a HF repo id whose `projector.pt` we download (`org/name` or `org/name/file`)."""
+    """A local path, else a HF model repo to download from: `org/name` (pulls `projector.pt`) or
+    `org/name/file.pt` (pulls that file)."""
     if Path(ref).exists():
         return ref
-    from huggingface_hub import hf_hub_download
-    repo, _, name = ref.rpartition("/")
-    return hf_hub_download(repo_id=repo, filename=name if name.endswith(".pt") else "projector.pt")
+    if ref.endswith(".pt"):
+        repo, _, name = ref.rpartition("/")
+        return hf_hub_download(repo_id=repo, filename=name)
+    return hf_hub_download(repo_id=ref, filename="projector.pt")
 
 
 def _load_adapter() -> VisualAdapter:
@@ -45,13 +48,17 @@ def _load_adapter() -> VisualAdapter:
     return adapter
 
 
-adapter = _load_adapter()  # once, at startup (dedicated-GPU Space; for ZeroGPU wrap respond in @spaces.GPU)
+adapter = _load_adapter()  # once, at startup — fine on a dedicated-GPU Space (ZeroGPU would need the
+                           # load + respond inside an @spaces.GPU fn + `spaces` in requirements; see README)
 
 
-def respond(message: dict, turns: list[Turn], chat: list[dict]):
+def respond(message: dict, turns: list[Turn],
+            chat: list[dict]) -> tuple[list[Turn], list[dict], gr.MultimodalTextbox]:
     """One submit: append the new user turn, regenerate the conversation (greedy -> prior replies are
     reproduced deterministically), show the latest reply. Stateless — `turns` is the whole history."""
-    text = (message.get("text") or "").strip()
+    # strip any literal <image> the user typed — markers are added per uploaded image below, so a stray
+    # one would desync the marker/image count and raise in _embed_multi.
+    text = (message.get("text") or "").replace(IMAGE_TOKEN, "").strip()
     images = [Image.open(f).convert("RGB") for f in message.get("files", [])]
     marker = f"{IMAGE_TOKEN}\n" * len(images)  # one <image> per uploaded image, filled by this turn
     turns = turns + [Turn(f"{marker}{text}", images)]

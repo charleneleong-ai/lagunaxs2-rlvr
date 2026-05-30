@@ -1,6 +1,7 @@
 # HF Space — Laguna XS.2 vision chat demo
 
-**Status:** design · **Branch:** `feat/hf-space-vision` · **Date:** 2026-05-30
+**Status:** deploy-ready (projector published to `chaleong/laguna-xs2-multimodal`; live A100 smoke
+test + final Space push pending) · **Branch:** `feat/hf-space-vision` · **Date:** 2026-05-30
 
 ## Goal
 

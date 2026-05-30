@@ -9,4 +9,4 @@ tiktoken
 sentencepiece
 huggingface_hub
 pillow
-gradio>=5
+gradio>=5.49
