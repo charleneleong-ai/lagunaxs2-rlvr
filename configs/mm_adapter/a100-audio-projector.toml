@@ -1,0 +1,36 @@
+# Projector-only audio-context proof of concept for one A100 (the visual config's audio twin).
+# Frozen Whisper encoder -> trainable projector -> frozen Laguna backbone; only the projector learns.
+# Debug on a small base (--base Qwen/Qwen3-0.6B); the configured backbone is the NVFP4 Laguna target.
+name = "laguna-xs2-whisper-audio-context"
+
+[backbone]
+model_id = "poolside/Laguna-XS.2-NVFP4"
+quantization = "4bit-nvfp4"
+freeze = true
+max_sequence_length = 8192
+
+[modality]
+kind = "audio"
+encoder_id = "openai/whisper-small"
+encoder_role = "speech_context_encoder"
+fallback_encoder_id = "openai/whisper-base"
+freeze_encoder = true
+
+[adapter]
+kind = "speech_context_projector"
+objective = "speech_to_text_alignment"
+output_tokens = 64
+train_projector = true
+
+[training]
+stage = "projector_sft"
+micro_batch_size = 1
+gradient_accumulation_steps = 16
+learning_rate = 0.0001
+max_steps = 1000
+lora_enabled = false
+
+[a100_40gb_guardrails]
+max_vram_gb = 40
+reserve_vram_gb = 4
+max_output_tokens = 128

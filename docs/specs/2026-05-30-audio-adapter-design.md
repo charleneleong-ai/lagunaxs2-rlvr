@@ -4,6 +4,8 @@
 **Branch:** `feat/audio-adapter` (off `feat/visual-adapter-ocr-encoder`, reusing the visual-adapter stack)
 **Context:** The visual adapter gave Laguna document understanding via a frozen-encoder → projector → frozen-LLM bridge. That pattern is **modality-agnostic** — the LLM consumes `inputs_embeds` and doesn't care what produced them. This spec extends it to **audio** (speech → text) by swapping the front-end encoder, reusing everything downstream.
 
+> **Status (built 2026-05-30):** the modality-agnostic core was extracted to [`laguna_rlvr/mm/`](../../src/laguna_rlvr/mm/) (`model.ModalityAdapter`, `projector`, `metrics`, `seed`), so paths below that read `visual/…` for the *shared* pieces now live under `mm/`. The audio modality lands in its own package: [`audio/encoders.py`](../../src/laguna_rlvr/audio/encoders.py) (`load_audio_encoder`) + [`audio/data.py`](../../src/laguna_rlvr/audio/data.py) (`LibriSpeechASR`), wired into the trainer via `--modality audio`. `wer()` is in [`mm/metrics.py`](../../src/laguna_rlvr/mm/metrics.py). Overfit-one-batch proof: [`tests/test_audio_model.py`](../../tests/test_audio_model.py).
+
 ## Summary
 
 A LLaVA-style audio adapter: `audio → [frozen Whisper encoder] → [trainable projector] → audio tokens → [frozen LLM] → text`. Only the projector trains. It is **purely additive** to the visual work — the projector, the `inputs_embeds` injection, the masked-CE training loop, the eval harness, and the GPU/quant-load path are all reused unchanged. The single new piece is an audio encoder wrapper; data is real speech with gold transcripts (self-verifying).
@@ -16,7 +18,7 @@ Debugged on the small Qwen base here; swappable to NVFP4 Laguna on the 80GB GPU,
 |---|---|---|
 | `Projector` (d_in→d_llm, + pooling) | `src/laguna_rlvr/visual/projector.py` | **reuse as-is** (audio `d_enc` is just a different `d_in`) |
 | `VisualAdapter` (encode→project→prepend→frozen LLM→masked CE; `transcribe()`) | `src/laguna_rlvr/visual/model.py` | **reuse** — it depends only on an `Encoder` with `.encode()/.d_enc`, not on images |
-| Train loop / CER-WER eval / GPU + quant-load path | `visual/train.py`, `visual/eval.py` | **reuse**, with `--modality audio` selecting the audio encoder + data |
+| Train loop / CER-WER eval / GPU + quant-load path | `mm/train.py`, `mm/eval.py` | **reuse**, with `--modality audio` selecting the audio encoder + data |
 | Config guardrails (`AdapterPlan`, `modality` field) | `src/laguna_rlvr/mm_adapter.py` | **reuse** — `modality.kind="audio"`, `encoder_id="openai/whisper-small"` |
 | **Audio encoder** | new: `src/laguna_rlvr/visual/audio_encoders.py` | the only genuinely new component (~40 lines) |
 | **Audio data** | new: `visual/audio_data.py` | small real ASR slice (gold transcripts) |
@@ -62,7 +64,16 @@ Primary metric **WER** (word error rate) — the speech analog of the visual CER
 
 ## Out of scope
 
-Interleaved audio+vision in one prompt (additive later: tag token types); a shared cross-modal projector; the real Laguna run (80 GB); TTS-synthetic data.
+Interleaved audio+vision in one prompt (additive later: tag token types); a shared cross-modal projector; the real Laguna run (80 GB).
+
+**Speech output / TTS — deliberately deferred (decided 2026-05-30): the adapter stays STT-only.** The
+thesis is *verifiable perception* (see/hear the artifact → act → verify); a coding agent rarely needs
+to speak, so all three TTS flavors are out of scope: (1) TTS-synthesized ASR *training data* — the
+cheapest, on-architecture extension if we ever want unlimited/domain-targeted speech (one light dep);
+(2) an output *pipeline* (LLM text → off-the-shelf TTS) — pure plumbing, no model change; (3) native
+speech *generation* (LLM emits audio-codec tokens → neural vocoder, Moshi/Qwen-Omni style) — a separate
+research program that breaks the frozen-backbone design (trains the backbone + adds a codec/vocoder).
+Revisit (1) first if the scope ever broadens past perception.
 
 ## References
 

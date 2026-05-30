@@ -33,12 +33,12 @@ class ModalityAdapter(nn.Module):
         encoder: EncoderProtocol,
         base_llm: str,
         projector_kind: str = "linear",
-        prompt: str = _PROMPT,
+        prompt: str | None = None,
         dtype: torch.dtype | None = None,
         device: str | None = None,
     ):
         super().__init__()
-        self.prompt = prompt  # modality-specific instruction (e.g. "Transcribe the speech:")
+        self.prompt = prompt or _PROMPT  # modality-specific instruction (e.g. "Transcribe the speech:")
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = dtype or (torch.bfloat16 if self.device.startswith("cuda") else torch.float32)
         self.encoder = encoder
