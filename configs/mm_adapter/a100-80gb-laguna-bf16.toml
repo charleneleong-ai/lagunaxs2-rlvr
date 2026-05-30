@@ -1,0 +1,42 @@
+# Projector-only visual-context training on one A100 80GB — the honest current setup.
+# Unquantized BF16 Laguna XS.2 (~67GB) frozen, GLM-OCR encoder frozen, train the projector only.
+# The NVFP4/FP8/INT4 checkpoints store MoE experts as per-expert packed Linears that don't load into
+# this modeling revision's fused expert params (they init random) — so we use the BF16 base, which
+# fits an 80GB A100 with headroom. The 40GB-NVFP4 scaffold lives in a100-40gb-projector.toml.
+name = "laguna-xs2-glm-ocr-visual-context-bf16"
+
+[backbone]
+model_id = "poolside/Laguna-XS.2"
+quantization = "bf16"
+params_b = 33.4
+freeze = true
+max_sequence_length = 8192
+
+[modality]
+kind = "document_image"
+encoder_id = "zai-org/GLM-OCR"
+encoder_role = "ocr_context_encoder"
+fallback_encoder_id = "google/siglip2-base-patch16-naflex"
+freeze_encoder = true
+
+[adapter]
+kind = "ocr_context_projector"
+objective = "optical_context_reconstruction"
+train_projector = true
+
+[training]
+stage = "projector_sft"
+micro_batch_size = 1
+gradient_accumulation_steps = 16
+learning_rate = 0.0001
+max_steps = 1000
+lora_enabled = false
+
+[gpu_guardrails]
+max_vram_gb = 80
+reserve_vram_gb = 6
+
+[mixture]
+# Weights for `--dataset mix` (override at the CLI with --mixture). A hand-set prior — sweep it
+# (scripts/mixture_sweep.py) and pick by held-out val rather than trust these numbers.
+weights = { websight = 0.55, webcode2m = 0.25, chartmimic = 0.1, swebench_mm = 0.1 }

@@ -1,0 +1,23 @@
+# Mixture sweep — try a few corpus-weight priors and pick by held-out val (scaled-down AutoMixer,
+# report §3.2.3). Run: `uv run python scripts/mixture_sweep.py configs/schedules/mixture_sweep.yaml`.
+# Each variant is a short projector run on --dataset mix with these weights; ranked by final val_loss.
+common_overrides:
+  steps: 800
+  n_train: 2000
+  pool: 8
+  eval_dataset: design2code   # fixed external held-out ranker (same unseen set for every variant)
+
+# All variants carry a `synthetic` (OCR) slice — a code-only mix erodes the GLM-OCR base's
+# transcription readout (see corpora._DEFAULT_MIX), so the sweep ranks OCR-anchored mixes; `ocr-heavy`
+# varies that knob so the sweep can price the OCR/code tradeoff this change introduced.
+variants:
+  - name: websight-heavy   # the current default prior (= corpora._DEFAULT_MIX)
+    weights: { websight: 0.45, webcode2m: 0.25, chartmimic: 0.10, swebench_mm: 0.10, synthetic: 0.10 }
+  - name: balanced
+    weights: { websight: 0.30, webcode2m: 0.30, chartmimic: 0.15, swebench_mm: 0.15, synthetic: 0.10 }
+  - name: real-web-heavy   # favor real designs over synthetic WebSight
+    weights: { websight: 0.20, webcode2m: 0.50, chartmimic: 0.10, swebench_mm: 0.10, synthetic: 0.10 }
+  - name: charts-up        # stress the chart→code modality
+    weights: { websight: 0.35, webcode2m: 0.20, chartmimic: 0.25, swebench_mm: 0.10, synthetic: 0.10 }
+  - name: ocr-heavy        # price the OCR/code tradeoff — more transcription anchor
+    weights: { websight: 0.35, webcode2m: 0.20, chartmimic: 0.10, swebench_mm: 0.10, synthetic: 0.25 }

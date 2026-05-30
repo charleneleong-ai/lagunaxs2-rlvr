@@ -1,0 +1,319 @@
+"""Train the visual-adapter projector (frozen encoder + frozen LLM), realizing an mm_adapter
+AdapterPlan TOML. Debug on a small base; point --base at the unquantized Laguna on an 80GB GPU.
+
+  python -m laguna_rlvr.visual.train --base Qwen/Qwen3-0.6B --steps 50
+  python -m laguna_rlvr.visual.train --encoder qwen3_vl --base Qwen/Qwen3-0.6B --steps 50
+  python -m laguna_rlvr.visual.train --base poolside/Laguna-XS.2   # BF16 backbone, 80GB GPU
+
+The NVFP4/FP8/INT4 Laguna checkpoints store MoE experts as per-expert quantized Linears, which
+compressed-tensors can't map onto this modeling revision's fused expert params — the experts load
+random. Use the unquantized base; the load-integrity guard in model.py enforces this.
+"""
+from __future__ import annotations
+
+import os
+import time
+import tomllib
+from pathlib import Path
+
+import torch
+import typer
+import wandb
+from autoresearch.gpu_monitor import GPUMonitor
+from autoresearch.results import log_experiment
+from torch.utils.data import DataLoader, Dataset
+
+from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
+from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
+from laguna_rlvr.visual.corpora import CHOICES, build_corpus, parse_mixture
+from laguna_rlvr.visual.data import SyntheticOCR
+from laguna_rlvr.visual.encoders import load_encoder
+from laguna_rlvr.visual.hf_image_text import HFImageTextDataset
+from laguna_rlvr.visual.metrics import generation_metrics
+from laguna_rlvr.visual.model import VisualAdapter
+
+_DEFAULT_CONFIG = "configs/mm_adapter/a100-80gb-laguna-bf16.toml"
+
+
+def _collate(batch):
+    cols = list(zip(*batch))
+    images, labels = list(cols[0]), list(cols[1])
+    corpora = list(cols[2]) if len(cols) > 2 else [None] * len(images)  # corpus tag (mix) or None
+    return images, labels, corpora
+
+
+def _ocr_probe(seed: int, n: int = 32) -> list:
+    """Held-out general-OCR retention probe: real document pages (moondream/ia_ocr) → text. GLM-OCR's
+    home turf — scored in val + eval so we can see the projector keeps the frozen base's native OCR
+    ability, not just the screenshot→code mix. ia_ocr is not a training corpus, so any slice is held
+    out; text is capped short to match the 48-token transcribe budget. Falls back to the in-process
+    SyntheticOCR floor if the remote set can't be fetched, so a detached run can't die on a download.
+    """
+    try:
+        return list(HFImageTextDataset("moondream/ia_ocr", n=n, max_text_chars=200))
+    except Exception as e:  # network / schema / cache failure -> degrade to the floor, don't crash
+        print(f"  [ocr-probe] moondream/ia_ocr unavailable ({type(e).__name__}: {e}); "
+              "using SyntheticOCR floor", flush=True)
+        return list(SyntheticOCR(n=16, seed=seed))
+
+
+@torch.no_grad()
+def _val_loss(adapter: VisualAdapter, loader: DataLoader) -> tuple[float, dict[str, float]]:
+    """Mean per-example val loss, plus a per-corpus breakdown (so swe-vs-websight ranges are visible)."""
+    adapter.llm.gradient_checkpointing_disable()  # no backward in eval -> checkpointing is pure overhead
+    try:
+        total, n = 0.0, 0
+        per_sum: dict[str, float] = {}
+        per_n: dict[str, int] = {}
+        for images, labels, corpora in loader:
+            li = adapter(images, labels).loss.item() * len(labels)
+            total += li
+            n += len(labels)
+            c = corpora[0]
+            if c is not None:
+                per_sum[c] = per_sum.get(c, 0.0) + li
+                per_n[c] = per_n.get(c, 0) + len(labels)
+    finally:
+        adapter.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    return total / max(n, 1), {c: per_sum[c] / per_n[c] for c in per_sum}
+
+
+def _log_samples(run, ds: Dataset, key: str, n: int = 8) -> None:
+    """Log a few (image, text) pairs as a W&B table so the corpus is inspectable in the dashboard."""
+    table = wandb.Table(columns=["image", "text"])
+    for i in range(min(n, len(ds))):
+        item = ds[i]
+        table.add_data(wandb.Image(item[0]), item[1])  # item may be (img, txt) or (img, txt, corpus)
+    run.log({key: table}, step=0)
+
+
+def _save_resume(path: Path, adapter: VisualAdapter, opt, step: int, run) -> None:
+    """Atomically write resume state (projector + optimizer + step + W&B id) for crash recovery."""
+    tmp = path.with_suffix(".tmp")
+    torch.save({"projector": adapter.projector.state_dict(), "opt": opt.state_dict(),
+                "step": step, "wandb_id": run.id if run else None}, tmp)
+    tmp.replace(path)  # rename is atomic — a crash mid-write never corrupts the live checkpoint
+
+
+def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | None = None,
+          steps: int | None = None, n_train: int = 512, pool: int = 4,
+          projector_kind: str = "linear", out: str = "results/visual",
+          seed: int = DEFAULT_SEED, dataset: str = "synthetic", use_wandb: bool = True,
+          resume: bool = True, mixture: str = "", name_suffix: str = "",
+          eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
+          qa_eval: bool = False) -> Path:
+    seed_everything(seed)
+    cfg = tomllib.loads(Path(config).read_text())
+    plan = plan_from_config(cfg)
+    print(render_plan(plan), flush=True)
+    training = cfg.get("training", {})
+    lr = float(training.get("learning_rate", 1e-4))
+    max_steps = steps or int(training.get("max_steps", 1000))
+    grad_accum = plan.gradient_accumulation_steps
+    base = base or plan.backbone_model
+
+    # Enforce the VRAM-budget guardrails only for the configured backbone; a small debug --base is exempt.
+    issues = validate_gpu_budget(plan)
+    if base == plan.backbone_model and issues:
+        raise SystemExit("Guardrail failures for the configured backbone:\n- " + "\n- ".join(issues))
+
+    enc = load_encoder(encoder, pool=pool)
+    adapter = VisualAdapter(enc, base, projector_kind=projector_kind)
+    opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
+
+    # Mixture weights: --mixture overrides the config's [mixture].weights, which overrides _DEFAULT_MIX.
+    mix_specs = parse_mixture(mixture) if mixture else [
+        (k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
+    full = build_corpus(dataset, n_train, mixture=mix_specs)
+    n_val = min(max(1, len(full) // 10), 256)  # 90/10 split, capped so frequent val stays cheap
+    train_ds, val_ds = torch.utils.data.random_split(
+        full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
+    loader = DataLoader(train_ds, batch_size=plan.micro_batch_size, shuffle=True, collate_fn=_collate)
+    val_loader = DataLoader(val_ds, batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
+    eval_loader = (DataLoader(build_corpus(eval_dataset, 128), batch_size=plan.micro_batch_size,
+                              shuffle=False, collate_fn=_collate) if eval_dataset else None)  # fixed ext. eval
+    val_every = max(50, min(max_steps // 10, 500))  # loss/early-stop cadence (bounded for high ceilings)
+    gen_every = val_every * 3  # generation metrics (WER/CER) are slow -> coarser cadence than loss val
+    wer_items = [val_ds[i] for i in range(min(16, len(val_ds)))]  # fixed subset for WER/CER (generation)
+    wer_images = [it[0] for it in wer_items]  # same subset's images, reused for the embedding-drift gauge
+    ocr_probe = _ocr_probe(seed=10_007)  # held-out general-OCR retention probe (val + eval)
+
+    # Scope the run identity by dataset too — otherwise different corpora on the same backbone share
+    # out_dir/resume.pt and the W&B run, so a crashed run is wrongly resumed by the next (caught 2026-05).
+    run_name = f"{encoder}__{Path(base).name}__{dataset}" + (f"__{name_suffix}" if name_suffix else "")
+    out_dir = Path(out) / run_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = out_dir / "projector.pt"
+
+    # Resume a crashed/pre-empted run: restore projector + optimizer + step, and rejoin the W&B run.
+    resume_ckpt = out_dir / "resume.pt"
+    start_step, resume_id = 0, None
+    if resume and resume_ckpt.exists():
+        state = torch.load(resume_ckpt, map_location="cpu")  # load_state_dict places opt state on the param device
+        adapter.projector.load_state_dict(state["projector"])
+        opt.load_state_dict(state["opt"])
+        start_step, resume_id = state["step"], state.get("wandb_id")
+        print(f"resuming from step {start_step}/{max_steps}", flush=True)
+
+    # Offline when no WANDB_API_KEY (still produces a local trace to sync later); online otherwise.
+    run = None
+    if use_wandb:
+        if not os.environ.get("WANDB_API_KEY"):
+            os.environ.setdefault("WANDB_MODE", "offline")
+        run = wandb.init(project="laguna-mm-adapter", name=run_name,
+                         id=resume_id, resume="allow" if resume_id else None,
+                         config={"base": base, "encoder": encoder, "projector": projector_kind,
+                                 "dataset": dataset, "lr": lr, "max_steps": max_steps,
+                                 "grad_accum": grad_accum, "n_train": n_train, "seed": seed})
+        if start_step == 0:  # sample tables log at step 0 — skip when rejoining a resumed run
+            _log_samples(run, train_ds, "train/samples")
+            _log_samples(run, val_ds, "val/samples")
+
+    # GPUMonitor samples nvidia-smi in the background; always log a results.jsonl row (even on
+    # crash/SIGINT) so the sweep tracker sees CRASH instead of a silently-vanished iter.
+    t0 = time.monotonic()
+    step, last_loss, last_val, eval_loss, status = (
+        start_step, float("nan"), float("nan"), float("nan"), "CRASH")
+    best_val, since_improve, stop = float("inf"), 0, False
+    qa_acc, qa_recall = float("nan"), float("nan")
+    best_ckpt = out_dir / "best.pt"
+    monitor = GPUMonitor()
+    try:
+        with monitor:
+            opt.zero_grad()
+            window = None  # GPU-side running sum of micro-losses → mean over the effective batch
+            cwin: dict = {}  # per-corpus (loss-sum, count) over the batch, for per-corpus train logging
+            while step < max_steps and not stop:
+                for images, labels, corpora in loader:
+                    loss = adapter(images, labels).loss / grad_accum
+                    loss.backward()
+                    window = loss.detach() if window is None else window + loss.detach()
+                    c = corpora[0]  # micro_batch=1 → one corpus per step
+                    if c is not None:
+                        s, k = cwin.get(c, (None, 0))
+                        cwin[c] = (loss.detach() if s is None else s + loss.detach(), k + 1)
+                    if (step + 1) % grad_accum == 0:
+                        opt.step()
+                        opt.zero_grad()
+                        # log the effective-batch mean loss per optimizer step — smoother than a
+                        # single micro-example, and one CUDA sync per step rather than every micro-step.
+                        last_loss = window.item()
+                        if run:
+                            log = {"train/loss/total": last_loss}
+                            for cc, (s, k) in cwin.items():
+                                log[f"train/loss/{cc}"] = (s * grad_accum / k).item()
+                            run.log(log, step=step)
+                        if (step + 1) % (20 * grad_accum) == 0:
+                            print(f"step {step}/{max_steps} loss {last_loss:.4f}", flush=True)
+                        window, cwin = None, {}
+                    if step % val_every == 0:
+                        last_val, val_by_corpus = _val_loss(adapter, val_loader)
+                        # best-checkpoint + early stop on the in-mix val (this run's convergence signal)
+                        if last_val < best_val - min_delta:
+                            best_val, since_improve = last_val, 0
+                            torch.save(adapter.projector.state_dict(), best_ckpt)
+                        else:
+                            since_improve += 1
+                        metrics = {"val/loss/total": last_val, "val/loss/best": best_val}
+                        metrics.update({f"val/loss/{cc}": v for cc, v in val_by_corpus.items()})
+                        if eval_loader is not None:  # trend the fixed external eval alongside val
+                            eval_loss, _ = _val_loss(adapter, eval_loader)
+                            metrics["eval/loss/total"] = eval_loss
+                        if step % gen_every == 0:  # WER/CER (generation) on a coarser cadence
+                            metrics.update(generation_metrics(adapter, wer_items, "val"))
+                            metrics.update(generation_metrics(adapter, ocr_probe, "val/ocr"))  # base-OCR retention
+                            # base-preservation gauge — projected tokens in-distribution vs base embeds
+                            metrics["val/metrics/embed_norm_ratio"] = adapter.embedding_norm_ratio(wer_images)
+                        wer_str = (f"  wer {metrics['val/metrics/wer']:.3f} cer {metrics['val/metrics/cer']:.3f}"
+                                   if "val/metrics/wer" in metrics else "")
+                        print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience}){wer_str}", flush=True)
+                        if run:
+                            run.log(metrics, step=step)
+                        if since_improve >= patience:
+                            print(f"early stop: no val improvement in {patience} evals", flush=True)
+                            stop = True
+                    step += 1
+                    if step % val_every == 0:  # crash-recovery checkpoint at the val cadence
+                        _save_resume(resume_ckpt, adapter, opt, step, run)
+                    if step >= max_steps or stop:
+                        break
+            # restore the best-val projector — the deliverable + final eval reflect the val minimum,
+            # not the (possibly overfit) last step.
+            if best_ckpt.exists():
+                adapter.projector.load_state_dict(torch.load(best_ckpt, map_location=adapter.llm.device))
+            last_val = best_val
+            if eval_loader is not None:  # final ranker value, recomputed on the best checkpoint
+                eval_loss, _ = _val_loss(adapter, eval_loader)
+                drift = adapter.embedding_norm_ratio(wer_images)
+                ocr = generation_metrics(adapter, ocr_probe, "eval/ocr")  # base-OCR retention on held-out probe
+                print(f"  eval/{eval_dataset} loss {eval_loss:.4f}  embed_norm_ratio {drift:.3f}"
+                      f"  ocr_wer {ocr['eval/ocr/metrics/wer']:.3f}", flush=True)
+                if run:
+                    run.log({"eval/loss/total": eval_loss, "eval/metrics/embed_norm_ratio": drift, **ocr}, step=step)
+            if qa_eval:  # does the single-turn projector transfer to multi-turn multimodal QA?
+                from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
+
+                qa = evaluate_multiturn_qa(adapter)
+                qa_acc, qa_recall = qa["qa/metrics/accuracy"], qa["qa/metrics/recall"]
+                print(f"  multiturn QA: acc {qa_acc:.3f}  recall {qa_recall:.3f}", flush=True)
+                if run:
+                    run.log(qa, step=step)
+        torch.save(adapter.projector.state_dict(), ckpt)  # = best-val weights
+        print(f"saved projector -> {ckpt} (best val {best_val:.4f})", flush=True)
+        status = "KEEP"
+        resume_ckpt.unlink(missing_ok=True)  # completed — don't let a fresh run resume it
+    finally:
+        gpu = monitor.summary()
+        print(monitor.format_summary(), flush=True)
+        if run:
+            run.summary.update({"final_loss": last_loss, "val_loss": last_val, "eval_loss": eval_loss,
+                                "qa_accuracy": qa_acc, "qa_recall": qa_recall, "status": status,
+                                "gpu_peak_mem_gb": gpu.peak_mem_gb, "gpu_mean_util_pct": gpu.mean_util_pct})
+            run.finish()
+        log_experiment(
+            tag="mm_adapter", config_name=run_name,
+            score=last_loss, steps=step, status=status,
+            description=f"visual projector ({projector_kind}) on {base} [{dataset}]",
+            wandb_url=run.url if run else "",
+            runtime_min=(time.monotonic() - t0) / 60,
+            extra={"final_loss": last_loss, "val_loss": last_val, "eval_loss": eval_loss,
+                   "qa_accuracy": qa_acc, "qa_recall": qa_recall,
+                   "eval_dataset": eval_dataset, "backbone": base,
+                   "encoder": encoder, "dataset": dataset,
+                   "gpu_mean_util_pct": round(gpu.mean_util_pct, 1),
+                   "gpu_peak_mem_gb": round(gpu.peak_mem_gb, 1),
+                   "gpu_peak_mem_pct": round(gpu.peak_mem_pct, 1)},
+        )
+    return ckpt
+
+
+app = typer.Typer(add_completion=False, help=__doc__)
+
+
+@app.command()
+def main(
+    config: str = _DEFAULT_CONFIG,
+    encoder: str = typer.Option("glm_ocr", help="glm_ocr | qwen3_vl"),
+    base: str = typer.Option(None, help="override the config backbone (e.g. Qwen/Qwen3-0.6B for debug)"),
+    steps: int = typer.Option(None, help="override config max_steps"),
+    n_train: int = 512,
+    pool: int = 4,
+    projector: str = typer.Option("linear", help="linear | mlp"),
+    out: str = "results/visual",
+    seed: int = DEFAULT_SEED,
+    dataset: str = typer.Option("synthetic", help=" | ".join(CHOICES)),
+    wandb_tracking: bool = typer.Option(True, "--wandb/--no-wandb", help="log to Weights & Biases"),
+    resume: bool = typer.Option(True, "--resume/--no-resume", help="resume from resume.pt if present"),
+    mixture: str = typer.Option("", help="override mix weights, e.g. 'websight=0.6,webcode2m=0.4'"),
+    name_suffix: str = typer.Option("", help="appended to the run name (isolates sweep variants)"),
+    eval_dataset: str = typer.Option("", help="fixed held-out eval corpus, e.g. design2code (logs eval/loss)"),
+    patience: int = typer.Option(3, help="early-stop after this many evals without val improvement"),
+    min_delta: float = typer.Option(1e-3, help="min val/loss decrease to count as an improvement"),
+    qa_eval: bool = typer.Option(False, "--qa-eval/--no-qa-eval", help="multi-turn multimodal QA probe (slow)"),
+) -> None:
+    train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
+          resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval)
+
+
+if __name__ == "__main__":
+    app()
