@@ -73,7 +73,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           projector_kind: str = "linear", out: str = "results/visual",
           seed: int = DEFAULT_SEED, dataset: str = "synthetic", use_wandb: bool = True,
           resume: bool = True, mixture: str = "", name_suffix: str = "",
-          eval_dataset: str = "") -> Path:
+          eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -97,12 +97,12 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     mix_specs = parse_mixture(mixture) if mixture else [
         (k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
     full = build_corpus(dataset, n_train, mixture=mix_specs)
-    n_val = max(1, len(full) // 10)  # 90/10 split, seeded for reproducibility
+    n_val = min(max(1, len(full) // 10), 256)  # 90/10 split, capped so frequent val stays cheap
     train_ds, val_ds = torch.utils.data.random_split(
         full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
     loader = DataLoader(train_ds, batch_size=plan.micro_batch_size, shuffle=True, collate_fn=_collate)
     val_loader = DataLoader(val_ds, batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
-    val_every = max(20, max_steps // 10)
+    val_every = max(50, min(max_steps // 10, 500))  # eval/early-stop cadence (bounded for high ceilings)
 
     # Scope the run identity by dataset too — otherwise different corpora on the same backbone share
     # out_dir/resume.pt and the W&B run, so a crashed run is wrongly resumed by the next (caught 2026-05).
@@ -140,12 +140,14 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     t0 = time.monotonic()
     step, last_loss, last_val, eval_loss, status = (
         start_step, float("nan"), float("nan"), float("nan"), "CRASH")
+    best_val, since_improve, stop = float("inf"), 0, False
+    best_ckpt = out_dir / "best.pt"
     monitor = GPUMonitor()
     try:
         with monitor:
             opt.zero_grad()
             window = None  # GPU-side running sum of micro-losses → mean over the effective batch
-            while step < max_steps:
+            while step < max_steps and not stop:
                 for images, labels in loader:
                     loss = adapter(images, labels).loss / grad_accum
                     loss.backward()
@@ -163,17 +165,28 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             print(f"step {step}/{max_steps} loss {last_loss:.4f}", flush=True)
                     if step % val_every == 0:
                         last_val = _val_loss(adapter, val_loader)
-                        print(f"  val loss {last_val:.4f}", flush=True)
+                        # best-checkpoint + early stop on the in-mix val (this run's convergence signal)
+                        if last_val < best_val - min_delta:
+                            best_val, since_improve = last_val, 0
+                            torch.save(adapter.projector.state_dict(), best_ckpt)
+                        else:
+                            since_improve += 1
+                        print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience})", flush=True)
                         if run:
-                            run.log({"val/loss": last_val}, step=step)
+                            run.log({"val/loss": last_val, "val/best": best_val}, step=step)
+                        if since_improve >= patience:
+                            print(f"early stop: no val improvement in {patience} evals", flush=True)
+                            stop = True
                     step += 1
                     if step % val_every == 0:  # crash-recovery checkpoint at the val cadence
                         _save_resume(resume_ckpt, adapter, opt, step, run)
-                    if step >= max_steps:
+                    if step >= max_steps or stop:
                         break
-            last_val = _val_loss(adapter, val_loader)
-            if run:
-                run.log({"val/loss": last_val}, step=step)
+            # restore the best-val projector — the deliverable + final eval reflect the val minimum,
+            # not the (possibly overfit) last step.
+            if best_ckpt.exists():
+                adapter.projector.load_state_dict(torch.load(best_ckpt, map_location=adapter.llm.device))
+            last_val = best_val
             if eval_dataset:  # fixed external held-out ranker (same set for every mixture variant)
                 eval_loader = DataLoader(build_corpus(eval_dataset, 128),
                                          batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
@@ -181,8 +194,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                 print(f"  eval/{eval_dataset} loss {eval_loss:.4f}", flush=True)
                 if run:
                     run.log({"eval/loss": eval_loss}, step=step)
-        torch.save(adapter.projector.state_dict(), ckpt)
-        print(f"saved projector -> {ckpt} (train {last_loss:.4f}, val {last_val:.4f})", flush=True)
+        torch.save(adapter.projector.state_dict(), ckpt)  # = best-val weights
+        print(f"saved projector -> {ckpt} (best val {best_val:.4f})", flush=True)
         status = "KEEP"
         resume_ckpt.unlink(missing_ok=True)  # completed — don't let a fresh run resume it
     finally:
@@ -229,9 +242,11 @@ def main(
     mixture: str = typer.Option("", help="override mix weights, e.g. 'websight=0.6,webcode2m=0.4'"),
     name_suffix: str = typer.Option("", help="appended to the run name (isolates sweep variants)"),
     eval_dataset: str = typer.Option("", help="fixed held-out eval corpus, e.g. design2code (logs eval/loss)"),
+    patience: int = typer.Option(3, help="early-stop after this many evals without val improvement"),
+    min_delta: float = typer.Option(1e-3, help="min val/loss decrease to count as an improvement"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
-          resume, mixture, name_suffix, eval_dataset)
+          resume, mixture, name_suffix, eval_dataset, patience, min_delta)
 
 
 if __name__ == "__main__":
