@@ -30,10 +30,12 @@ prompt/chat-template text  ──▶ embed ────────────�
   subtoken embeddings**, then frozen (the projector carries the learning). The token marks *where* projected
   vision tokens are spliced into the sequence — so vision can arrive **anywhere in the chat template**, not
   only as a prefix. This is the foundation for the next point.
-- **Vision as a tool observation.** Laguna's world is `tool_call → text observation`. The target integration
-  is a `screenshot`/`view_image` tool whose *observation* is the spliced vision tokens — making sight a
-  first-class agentic action the model learns to request and consume mid-trajectory (mirrors multi-harness
-  SFT §4.3.3 and agentic RL §4.4). The `<image>`-splice mechanism above is what makes this possible.
+- **Vision as a tool observation.** Laguna's world is `tool_call → text observation`. Multi-turn multimodal
+  `VisualAdapter.chat()` is implemented — vision arrives across turns (0..N `<image>` per turn), validated in
+  [`test_agentic_qa.py`](../tree/feat/mm-adapter/tests/test_agentic_qa.py). The remaining step is the target
+  integration: a `screenshot`/`view_image` tool in the `pool` harness whose *observation* is the spliced
+  vision tokens — making sight a first-class agentic action the model learns to request and consume
+  mid-trajectory (mirrors multi-harness SFT §4.3.3 and agentic RL §4.4).
 
 ## Beachhead: UI render-in-the-loop
 
@@ -63,7 +65,7 @@ verifier and feeding `image_assets` through our adapter. That env is then reusab
 | Stage | What | Report analog |
 |---|---|---|
 | 0 — baseline | tool-mediated `GLM-OCR → text` (text-dense artifacts only) | the bar the adapter must beat |
-| 1 — projector SFT | reconstruction on synthetic OCR (current scaffold, BF16) | imitation / mid-training §4.2 |
+| 1 — projector SFT | image→issue-text / screenshot→code on real data — swebench_mm done, WebSight running (BF16) | imitation / mid-training §4.2 |
 | 2 — agentic SFT | Hive-generated trajectories where the agent calls `screenshot` and conditions on vision | §4.3 SFT + §3.2.2 Hive |
 | 3 — **agentic RLVR (CISPO)** | render-diff / UI-match / test-pass as the binary verifier reward | §4.4 — the payoff |
 
@@ -94,7 +96,9 @@ be the agentic eval.
 
 ## Guardrails (already in place)
 
-- A100 config gate — `mm_adapter_plan.py` must print `A100-40GB guardrails: pass` before any heavyweight run.
+- VRAM-budget gate — `mm_adapter_plan.py` must print `GPU guardrails: pass` before any heavyweight run;
+  `validate_gpu_budget` checks the backbone footprint (params × bytes/quantization) + reserve against the
+  config's `max_vram_gb`, so BF16-on-40GB is blocked but the 80GB BF16 default config passes honestly.
 - Load-integrity guard — fails loudly if any backbone weight loads random (the NVFP4 trap).
 - Resumable runs — projector + optimizer + step + W&B id checkpointed atomically to `resume.pt` at the
   val cadence; a relaunch auto-resumes (and rejoins the W&B run), so a crash/preemption costs ≤ one cadence.
