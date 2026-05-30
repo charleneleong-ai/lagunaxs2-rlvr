@@ -47,3 +47,16 @@ def test_hf_image_text_caches_to_disk(tmp_path, monkeypatch):  # offline — loa
     monkeypatch.setattr(hit, "load_dataset", _boom)
     second = hit.HFImageTextDataset("fake/repo", n=2)
     assert [second[i][1] for i in range(len(second))] == ["<p>red</p>", "<p>blue</p>"]
+
+
+def test_ocr_probe_falls_back_to_synthetic(monkeypatch):  # detached run must survive a fetch failure
+    from laguna_rlvr.visual import train
+
+    def _boom(*a, **k):
+        raise RuntimeError("no network")
+
+    monkeypatch.setattr(train, "HFImageTextDataset", _boom)
+    probe = train._ocr_probe(seed=1)
+    assert len(probe) == 16  # SyntheticOCR floor, not the remote set
+    _img, text = probe[0]
+    assert text  # (image, text) transcription pairs

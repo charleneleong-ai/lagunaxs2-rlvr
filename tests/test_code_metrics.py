@@ -38,6 +38,36 @@ def test_codebleu_none_without_python():
     assert codebleu_score(["<a>1</a>"], ["<a>1</a>"], ["html"]) is None
 
 
+def test_soft_scalar_anchor_matches_embedding_median():
+    import torch
+
+    from laguna_rlvr.visual.model import VisualAdapter
+
+    adapter = object.__new__(VisualAdapter)  # bypass the heavy __init__ (no 33B load)
+    adapter._emb_norm_median = torch.tensor(3.0)
+    vis = torch.tensor([[[5.0, 0, 0, 0], [0, 1.0, 0, 0]]])  # token norms 5 and 1 (mean 3)
+    out = adapter._anchor(vis)
+    # mean token norm anchored to the median (3.0)...
+    assert abs(out.flatten(0, 1).norm(dim=-1).mean().item() - 3.0) < 1e-4
+    # ...and inter-token ratio preserved (single scalar): 5:1 stays 5:1
+    norms = out.flatten(0, 1).norm(dim=-1)
+    assert abs((norms[0] / norms[1]).item() - 5.0) < 1e-4
+
+
+def test_embedding_norm_ratio():
+    import torch
+
+    from laguna_rlvr.visual.model import VisualAdapter
+
+    adapter = object.__new__(VisualAdapter)  # bypass the heavy __init__ (no 33B load)
+    adapter._emb_norm_median = torch.tensor(1.0)
+    # ratio measures the RAW (anchor=False) projection -> 2 tokens each L2 norm sqrt(4)=2.0
+    adapter._project = lambda _images, anchor=True: torch.ones(1, 2, 4)
+
+    assert abs(adapter.embedding_norm_ratio([object()]) - 2.0) < 1e-5  # 2.0 / 1.0
+    assert adapter.embedding_norm_ratio([]) is None
+
+
 def test_generation_metrics_scopes_wer_cer_to_ocr():
     from laguna_rlvr.visual.metrics import generation_metrics
 

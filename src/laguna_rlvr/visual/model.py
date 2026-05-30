@@ -94,6 +94,9 @@ class VisualAdapter(nn.Module):
         )
         self.projector = Projector(encoder.d_enc, self.llm.config.hidden_size, projector_kind)
         self.projector.to(device=self.llm.device, dtype=self.llm.dtype)
+        # frozen backbone => its native-embedding norm scale is constant; cache the median once so the
+        # base-preservation gauge (embedding_norm_ratio) doesn't re-reduce the full vocab table per call.
+        self._emb_norm_median = self.llm.get_input_embeddings().weight.float().norm(dim=-1).median()
 
     def trainable_parameters(self):
         return self.projector.parameters()
@@ -140,9 +143,33 @@ class VisualAdapter(nn.Module):
         """Single-image splice — `text` must contain exactly one <image>. See `_embed_multi`."""
         return self._embed_multi(text, [vis])
 
-    def _project(self, images: list) -> torch.Tensor:
+    def _anchor(self, vis: torch.Tensor) -> torch.Tensor:
+        """Soft scalar anchor: scale all vision tokens by one factor so their mean L2 norm matches the
+        frozen embedding median. Keeps the spliced sequence in the backbone's input distribution while
+        preserving inter-token magnitude ratios (salience) — the one trainable bridge can't quietly
+        drift the input scale off base. float() for a stable bf16 reduction; the scalar broadcasts back.
+        """
+        mean_norm = vis.flatten(0, 1).float().norm(dim=-1).mean().clamp_min(1e-6)
+        return vis * (self._emb_norm_median / mean_norm).to(vis.dtype)
+
+    def _project(self, images: list, anchor: bool = True) -> torch.Tensor:
         feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
-        return self.projector(feats)  # (B, Nv, D)
+        vis = self.projector(feats)  # (B, Nv, D)
+        return self._anchor(vis) if anchor else vis
+
+    @torch.no_grad()
+    def embedding_norm_ratio(self, images: list) -> float | None:
+        """Mean L2 norm of the *raw* (pre-anchor) projected vision tokens / median embedding norm.
+
+        Base-preservation gauge measured behind the anchor: ~1.0 = the projector naturally emits
+        base-scale tokens (anchor is a no-op); far from 1 = the projector is drifting and the anchor is
+        doing the work to keep the frozen LLM's inputs in-distribution. Equals 1/(anchor scale factor).
+        None if there are no images.
+        """
+        if not images:
+            return None
+        vis = self._project(images, anchor=False)  # raw — what the projector wants, pre-correction
+        return (vis.flatten(0, 1).float().norm(dim=-1).mean() / self._emb_norm_median).item()
 
     def forward(self, images: list, labels: list[str]) -> Output:
         vis = self._project(images)  # (B, Nv, D)

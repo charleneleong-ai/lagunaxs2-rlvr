@@ -26,7 +26,9 @@ from torch.utils.data import DataLoader, Dataset
 from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
 from laguna_rlvr.visual.corpora import CHOICES, build_corpus, parse_mixture
+from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.encoders import load_encoder
+from laguna_rlvr.visual.hf_image_text import HFImageTextDataset
 from laguna_rlvr.visual.metrics import generation_metrics
 from laguna_rlvr.visual.model import VisualAdapter
 
@@ -38,6 +40,21 @@ def _collate(batch):
     images, labels = list(cols[0]), list(cols[1])
     corpora = list(cols[2]) if len(cols) > 2 else [None] * len(images)  # corpus tag (mix) or None
     return images, labels, corpora
+
+
+def _ocr_probe(seed: int, n: int = 32) -> list:
+    """Held-out general-OCR retention probe: real document pages (moondream/ia_ocr) → text. GLM-OCR's
+    home turf — scored in val + eval so we can see the projector keeps the frozen base's native OCR
+    ability, not just the screenshot→code mix. ia_ocr is not a training corpus, so any slice is held
+    out; text is capped short to match the 48-token transcribe budget. Falls back to the in-process
+    SyntheticOCR floor if the remote set can't be fetched, so a detached run can't die on a download.
+    """
+    try:
+        return list(HFImageTextDataset("moondream/ia_ocr", n=n, max_text_chars=200))
+    except Exception as e:  # network / schema / cache failure -> degrade to the floor, don't crash
+        print(f"  [ocr-probe] moondream/ia_ocr unavailable ({type(e).__name__}: {e}); "
+              "using SyntheticOCR floor", flush=True)
+        return list(SyntheticOCR(n=16, seed=seed))
 
 
 @torch.no_grad()
@@ -118,6 +135,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     val_every = max(50, min(max_steps // 10, 500))  # loss/early-stop cadence (bounded for high ceilings)
     gen_every = val_every * 3  # generation metrics (WER/CER) are slow -> coarser cadence than loss val
     wer_items = [val_ds[i] for i in range(min(16, len(val_ds)))]  # fixed subset for WER/CER (generation)
+    wer_images = [it[0] for it in wer_items]  # same subset's images, reused for the embedding-drift gauge
+    ocr_probe = _ocr_probe(seed=10_007)  # held-out general-OCR retention probe (val + eval)
 
     # Scope the run identity by dataset too — otherwise different corpora on the same backbone share
     # out_dir/resume.pt and the W&B run, so a crashed run is wrongly resumed by the next (caught 2026-05).
@@ -202,6 +221,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             metrics["eval/loss/total"] = eval_loss
                         if step % gen_every == 0:  # WER/CER (generation) on a coarser cadence
                             metrics.update(generation_metrics(adapter, wer_items, "val"))
+                            metrics.update(generation_metrics(adapter, ocr_probe, "val/ocr"))  # base-OCR retention
+                            # base-preservation gauge — projected tokens in-distribution vs base embeds
+                            metrics["val/metrics/embed_norm_ratio"] = adapter.embedding_norm_ratio(wer_images)
                         wer_str = (f"  wer {metrics['val/metrics/wer']:.3f} cer {metrics['val/metrics/cer']:.3f}"
                                    if "val/metrics/wer" in metrics else "")
                         print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience}){wer_str}", flush=True)
@@ -222,9 +244,12 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             last_val = best_val
             if eval_loader is not None:  # final ranker value, recomputed on the best checkpoint
                 eval_loss, _ = _val_loss(adapter, eval_loader)
-                print(f"  eval/{eval_dataset} loss {eval_loss:.4f}", flush=True)
+                drift = adapter.embedding_norm_ratio(wer_images)
+                ocr = generation_metrics(adapter, ocr_probe, "eval/ocr")  # base-OCR retention on held-out probe
+                print(f"  eval/{eval_dataset} loss {eval_loss:.4f}  embed_norm_ratio {drift:.3f}"
+                      f"  ocr_wer {ocr['eval/ocr/metrics/wer']:.3f}", flush=True)
                 if run:
-                    run.log({"eval/loss/total": eval_loss}, step=step)
+                    run.log({"eval/loss/total": eval_loss, "eval/metrics/embed_norm_ratio": drift, **ocr}, step=step)
             if qa_eval:  # does the single-turn projector transfer to multi-turn multimodal QA?
                 from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
 
