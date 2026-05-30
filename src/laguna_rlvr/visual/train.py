@@ -82,7 +82,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           projector_kind: str = "linear", out: str = "results/visual",
           seed: int = DEFAULT_SEED, dataset: str = "synthetic", use_wandb: bool = True,
           resume: bool = True, mixture: str = "", name_suffix: str = "",
-          eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3) -> Path:
+          eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
+          qa_eval: bool = False) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -150,6 +151,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     step, last_loss, last_val, eval_loss, status = (
         start_step, float("nan"), float("nan"), float("nan"), "CRASH")
     best_val, since_improve, stop = float("inf"), 0, False
+    qa_acc, qa_recall = float("nan"), float("nan")
     best_ckpt = out_dir / "best.pt"
     monitor = GPUMonitor()
     try:
@@ -212,6 +214,14 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                 print(f"  eval/{eval_dataset} loss {eval_loss:.4f}", flush=True)
                 if run:
                     run.log({"eval/loss": eval_loss}, step=step)
+            if qa_eval:  # does the single-turn projector transfer to multi-turn multimodal QA?
+                from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
+
+                qa = evaluate_multiturn_qa(adapter)
+                qa_acc, qa_recall = qa["qa/accuracy"], qa["qa/recall"]
+                print(f"  multiturn QA: acc {qa_acc:.3f}  recall {qa_recall:.3f}", flush=True)
+                if run:
+                    run.log(qa, step=step)
         torch.save(adapter.projector.state_dict(), ckpt)  # = best-val weights
         print(f"saved projector -> {ckpt} (best val {best_val:.4f})", flush=True)
         status = "KEEP"
@@ -221,8 +231,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         print(monitor.format_summary(), flush=True)
         if run:
             run.summary.update({"final_loss": last_loss, "val_loss": last_val, "eval_loss": eval_loss,
-                                "status": status, "gpu_peak_mem_gb": gpu.peak_mem_gb,
-                                "gpu_mean_util_pct": gpu.mean_util_pct})
+                                "qa_accuracy": qa_acc, "qa_recall": qa_recall, "status": status,
+                                "gpu_peak_mem_gb": gpu.peak_mem_gb, "gpu_mean_util_pct": gpu.mean_util_pct})
             run.finish()
         log_experiment(
             tag="mm_adapter", config_name=run_name,
@@ -231,6 +241,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             wandb_url=run.url if run else "",
             runtime_min=(time.monotonic() - t0) / 60,
             extra={"final_loss": last_loss, "val_loss": last_val, "eval_loss": eval_loss,
+                   "qa_accuracy": qa_acc, "qa_recall": qa_recall,
                    "eval_dataset": eval_dataset, "backbone": base,
                    "encoder": encoder, "dataset": dataset,
                    "gpu_mean_util_pct": round(gpu.mean_util_pct, 1),
@@ -262,9 +273,10 @@ def main(
     eval_dataset: str = typer.Option("", help="fixed held-out eval corpus, e.g. design2code (logs eval/loss)"),
     patience: int = typer.Option(3, help="early-stop after this many evals without val improvement"),
     min_delta: float = typer.Option(1e-3, help="min val/loss decrease to count as an improvement"),
+    qa_eval: bool = typer.Option(False, "--qa-eval/--no-qa-eval", help="multi-turn multimodal QA probe (slow)"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
-          resume, mixture, name_suffix, eval_dataset, patience, min_delta)
+          resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval)
 
 
 if __name__ == "__main__":

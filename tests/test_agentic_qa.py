@@ -47,3 +47,10 @@ class TestMultiTurnMultimodalQA:
     def test_marker_image_count_mismatch_raises(self, adapter):
         with pytest.raises(ValueError):
             adapter._embed_multi(f"one {IMAGE_TOKEN} marker", [])
+
+    def test_multiturn_qa_eval_returns_metrics(self, adapter):
+        from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
+
+        m = evaluate_multiturn_qa(adapter, n=2, max_new_tokens=4)
+        assert set(m) == {"qa/accuracy", "qa/recall"}
+        assert all(0.0 <= v <= 1.0 for v in m.values())
