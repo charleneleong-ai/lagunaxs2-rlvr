@@ -59,14 +59,19 @@ def respond(message: dict, turns: list[Turn],
     # strip any literal <image> the user typed — markers are added per uploaded image below, so a stray
     # one would desync the marker/image count and raise in _embed_multi.
     text = (message.get("text") or "").replace(IMAGE_TOKEN, "").strip()
-    images = [Image.open(f).convert("RGB") for f in message.get("files", [])]
+    files = message.get("files", [])
+    images = [Image.open(f).convert("RGB") for f in files]
     marker = f"{IMAGE_TOKEN}\n" * len(images)  # one <image> per uploaded image, filled by this turn
     turns = turns + [Turn(f"{marker}{text}", images)]
 
     reply = adapter.chat(turns, max_new_tokens=MAX_TOKENS)[-1]
 
-    chat = chat + [{"role": "user", "content": text or "(image)"},
-                   {"role": "assistant", "content": reply}]
+    # echo the uploaded image(s) + text into the visible chat, then the reply (each as its own message
+    # so the Chatbot actually shows what was sent — not just a "(image)" placeholder).
+    history = [{"role": "user", "content": {"path": f}} for f in files]
+    if text:
+        history.append({"role": "user", "content": text})
+    chat = chat + history + [{"role": "assistant", "content": reply}]
     return turns, chat, gr.MultimodalTextbox(value=None)
 
 
