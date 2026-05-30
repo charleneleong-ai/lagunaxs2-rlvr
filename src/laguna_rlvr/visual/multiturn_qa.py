@@ -20,7 +20,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from laguna_rlvr.visual.baseline import _QA_GEN_TOKENS, glm_ocr_transcribe, staged_base_llm, text_chat
+from laguna_rlvr.visual.baseline import _QA_GEN_TOKENS, glm_ocr_transcribe, text_chat
 from laguna_rlvr.visual.corpora import CORPUS_KIND, build_corpus, extract_needle, read_question
 from laguna_rlvr.visual.data import render_text
 from laguna_rlvr.visual.model import IMAGE_TOKEN, Turn, VisualAdapter
@@ -95,7 +95,7 @@ def load_or_build_episodes(source: str, n: int, seed: int, manifest: Path = _MAN
 
 # ── image fetch (cached, re-fetches real rows by index) ────────────────────────────────────────────
 
-def _image_fetcher(episodes: list[Episode]):
+def image_fetcher(episodes: list[Episode]):
     """Return `fetch(ref) -> image`, building each real corpus once at `_PER_CORPUS` rows — the same
     size `mixture_episodes` builds at, so the on-disk corpus cache hits instead of re-streaming."""
     cache: dict = {}
@@ -173,26 +173,5 @@ def evaluate_multiturn_qa(adapter: VisualAdapter, n: int = 16, seed: int = 0,
     """Adapter multi-turn QA. `source="synthetic"` (default) = fast offline sanity used in training;
     `source="mixture"` = the real-corpora benchmark (built + persisted to `manifest` on first run)."""
     episodes = load_or_build_episodes(source, n, seed, manifest)
-    fetch = _image_fetcher(episodes)
+    fetch = image_fetcher(episodes)
     return run_qa(adapter_runner(adapter, fetch, max_new_tokens), episodes)
-
-
-def run_multiturn_qa_panel(baselines: list[str], n_eval: int, base_llm: str,
-                           device: str = "cuda") -> dict[str, dict[str, float]]:
-    """Stage-0 QA panel over the real-mixture manifest: blind + OCR-mediated base LLM (staged GPU —
-    every deduped episode image is transcribed before the base LLM loads). The adapter QA row comes
-    from `evaluate_multiturn_qa(source="mixture")`."""
-    episodes = load_or_build_episodes("mixture", n_eval, 0)
-    fetch = _image_fetcher(episodes)
-    transcribe = (lambda: transcribe_episodes(episodes, fetch, device=device)) if "ocr" in baselines else None
-    transcripts, llm, tok = staged_base_llm(base_llm, device, transcribe)
-    panel = {}
-    for name in baselines:
-        if name == "blind":
-            run = blind_runner(llm, tok)
-        elif name == "ocr":
-            run = ocr_runner(llm, tok, transcripts)
-        else:
-            continue
-        panel[name] = run_qa(run, episodes, prefix=f"qa/{name}")
-    return panel
