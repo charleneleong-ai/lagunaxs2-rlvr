@@ -71,18 +71,33 @@ verifier and feeding `image_assets` through our adapter. That env is then reusab
 assertions) extends directly: render the agent's output → image → match to target / tests pass. A render-diff
 is a deterministic verifier, so it drops into CISPO with no reward model.
 
-## Data: self-labeling, verifiable
+## Data: corpus registry + train/eval split
 
-Reuse the report's "real git commit → verifiable task" trick (§4.3.1) for *visual* diffs:
-- Render real frontend / matplotlib sources → `(screenshot, source)` pairs (infinite, self-labeling).
-- Mutation tasks: take a working UI, inject a visual bug (CSS) → target is the screenshot of the correct
-  version → verify by re-render diff.
-- SWE-bench Multimodal `image_assets` + test specs as the real-world held-out set.
+Corpora are registered in [`visual/corpora.py`](../tree/feat/mm-adapter/src/laguna_rlvr/visual/corpora.py)
+(`--dataset <name>`), each a lazy builder so a corpus's heavy deps load only when requested. The split
+that solves train/val *at the dataset level*:
+
+| Role | Corpus | Why |
+|---|---|---|
+| **Train** | [`HuggingFaceM4/WebSight`](https://hf.co/datasets/HuggingFaceM4/WebSight) (2M, screenshot→HTML) | the UI-beachhead workhorse; re-renderable → verifiable |
+| **Train (realism)** | [`xcodemind/webcode2m`](https://hf.co/datasets/xcodemind/webcode2m) (3.2M real designs→code) | real-world distribution |
+| **Train (alignment)** | `swebench_mm` (612 image→issue-text) | real visual-software artifacts on the target dist |
+| **Held-out eval** | [`SALT-NLP/Design2Code`](https://hf.co/datasets/SALT-NLP/Design2Code)(-HARD) | render-diff |
+| **Held-out eval** | SWE-bench M `test` via the agentic test-pass verifier | execution-grounded |
+
+WebSight/WebCode2M embed the screenshot as an `Image` column (streamed via
+[`hf_image_text.py`](../tree/feat/mm-adapter/src/laguna_rlvr/visual/hf_image_text.py) — no download);
+SWE-bench M's images are external URLs (fetched + cached). Within a corpus, the in-run seeded 90/10
+split gives the live `val/loss`. **Charts** (Chart2Code-160k, ChartMimic) are a planned warm-up — deferred
+until their schema/loader is confirmed. Holdout discipline: don't train on SWE-bench M `test` if it will
+be the agentic eval.
 
 ## Guardrails (already in place)
 
 - A100 config gate — `mm_adapter_plan.py` must print `A100-40GB guardrails: pass` before any heavyweight run.
 - Load-integrity guard — fails loudly if any backbone weight loads random (the NVFP4 trap).
+- Resumable runs — projector + optimizer + step + W&B id checkpointed atomically to `resume.pt` at the
+  val cadence; a relaunch auto-resumes (and rejoins the W&B run), so a crash/preemption costs ≤ one cadence.
 - Determinism — `seed_everything()` + `--seed` (default 42).
 - Always-logged `results.jsonl` via `GPUMonitor` (autoresearch).
 
