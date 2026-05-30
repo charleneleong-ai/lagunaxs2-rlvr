@@ -11,7 +11,14 @@ dependencies = [
     "datasets>=2.19",
     "pandas>=2.2",
     "matplotlib>=3.8",
-    "compressed-tensors>=0.16.0",
+    # visual adapter (mm-adapter): frozen encoder -> projector -> frozen LLM, + OCR->Laguna doc-QA
+    "torch>=2.12.0",
+    "transformers>=5.9.0",
+    "accelerate>=1.13.0",
+    "torchvision>=0.27.0",   # runtime dep of transformers v5 image processors
+    "pillow>=12.2.0",
+    "jiwer>=4.0.0",
+    "compressed-tensors>=0.16.0",   # NVFP4 Laguna backbone load
 ]
 
 [dependency-groups]
