@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
-from laguna_rlvr.visual.corpora import REGISTRY, build_corpus
+from laguna_rlvr.visual.corpora import CHOICES, build_corpus, parse_mixture
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.model import VisualAdapter
 
@@ -72,7 +72,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           steps: int | None = None, n_train: int = 512, pool: int = 4,
           projector_kind: str = "linear", out: str = "results/visual",
           seed: int = DEFAULT_SEED, dataset: str = "synthetic", use_wandb: bool = True,
-          resume: bool = True) -> Path:
+          resume: bool = True, mixture: str = "", name_suffix: str = "") -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -92,7 +92,10 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     adapter = VisualAdapter(enc, base, projector_kind=projector_kind)
     opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
 
-    full = build_corpus(dataset, n_train)
+    # Mixture weights: --mixture overrides the config's [mixture].weights, which overrides _DEFAULT_MIX.
+    mix_specs = parse_mixture(mixture) if mixture else [
+        (k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
+    full = build_corpus(dataset, n_train, mixture=mix_specs)
     n_val = max(1, len(full) // 10)  # 90/10 split, seeded for reproducibility
     train_ds, val_ds = torch.utils.data.random_split(
         full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
@@ -102,7 +105,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
 
     # Scope the run identity by dataset too — otherwise different corpora on the same backbone share
     # out_dir/resume.pt and the W&B run, so a crashed run is wrongly resumed by the next (caught 2026-05).
-    run_name = f"{encoder}__{Path(base).name}__{dataset}"
+    run_name = f"{encoder}__{Path(base).name}__{dataset}" + (f"__{name_suffix}" if name_suffix else "")
     out_dir = Path(out) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt = out_dir / "projector.pt"
@@ -206,12 +209,14 @@ def main(
     projector: str = typer.Option("linear", help="linear | mlp"),
     out: str = "results/visual",
     seed: int = DEFAULT_SEED,
-    dataset: str = typer.Option("synthetic", help=" | ".join(REGISTRY)),
+    dataset: str = typer.Option("synthetic", help=" | ".join(CHOICES)),
     wandb_tracking: bool = typer.Option(True, "--wandb/--no-wandb", help="log to Weights & Biases"),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="resume from resume.pt if present"),
+    mixture: str = typer.Option("", help="override mix weights, e.g. 'websight=0.6,webcode2m=0.4'"),
+    name_suffix: str = typer.Option("", help="appended to the run name (isolates sweep variants)"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
-          resume)
+          resume, mixture, name_suffix)
 
 
 if __name__ == "__main__":

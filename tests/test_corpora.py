@@ -14,6 +14,12 @@ def test_build_corpus_unknown_raises():
         build_corpus("nope", 4)
 
 
+def test_parse_mixture():
+    from laguna_rlvr.visual.corpora import parse_mixture
+
+    assert parse_mixture("websight=0.6, webcode2m=0.4") == [("websight", 0.6), ("webcode2m", 0.4)]
+
+
 def test_mixture_blends_corpora_by_weight():  # offline — synthetic only
     from laguna_rlvr.visual.corpora import _Mixture
 

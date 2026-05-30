@@ -35,3 +35,8 @@ lora_enabled = false
 [gpu_guardrails]
 max_vram_gb = 80
 reserve_vram_gb = 6
+
+[mixture]
+# Weights for `--dataset mix` (override at the CLI with --mixture). A hand-set prior — sweep it
+# (scripts/mixture_sweep.py) and pick by held-out val rather than trust these numbers.
+weights = { websight = 0.55, webcode2m = 0.25, chartmimic = 0.1, swebench_mm = 0.1 }

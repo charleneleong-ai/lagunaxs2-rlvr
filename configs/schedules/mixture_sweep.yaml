@@ -1,0 +1,17 @@
+# Mixture sweep — try a few corpus-weight priors and pick by held-out val (scaled-down AutoMixer,
+# report §3.2.3). Run: `uv run python scripts/mixture_sweep.py configs/schedules/mixture_sweep.yaml`.
+# Each variant is a short projector run on --dataset mix with these weights; ranked by final val_loss.
+common_overrides:
+  steps: 800
+  n_train: 2000
+  pool: 8
+
+variants:
+  - name: websight-heavy   # the current default prior
+    weights: { websight: 0.55, webcode2m: 0.25, chartmimic: 0.10, swebench_mm: 0.10 }
+  - name: balanced
+    weights: { websight: 0.35, webcode2m: 0.35, chartmimic: 0.15, swebench_mm: 0.15 }
+  - name: real-web-heavy   # favor real designs over synthetic WebSight
+    weights: { websight: 0.25, webcode2m: 0.55, chartmimic: 0.10, swebench_mm: 0.10 }
+  - name: charts-up        # stress the chart→code modality
+    weights: { websight: 0.40, webcode2m: 0.25, chartmimic: 0.25, swebench_mm: 0.10 }

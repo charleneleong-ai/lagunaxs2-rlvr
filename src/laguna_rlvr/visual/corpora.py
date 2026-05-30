@@ -61,9 +61,12 @@ class _Mixture(Dataset):
         self._datasets: list[Dataset] = []
         self._index: list[tuple[int, int]] = []
         for di, (name, weight) in enumerate(specs):
-            ds = build_corpus(name, max(1, round(n * weight / total)))
+            quota = max(1, round(n * weight / total))
+            ds = build_corpus(name, quota)
             self._datasets.append(ds)
-            self._index += [(di, j) for j in range(len(ds))]
+            # cap to the quota so a fixed-size corpus (swebench_mm always returns 612) can't blow its
+            # weight — the realized mix then matches the requested weights.
+            self._index += [(di, j) for j in range(min(quota, len(ds)))]
 
     def __len__(self) -> int:
         return len(self._index)
@@ -73,13 +76,9 @@ class _Mixture(Dataset):
         return self._datasets[di][j]
 
 
-# Default full-training mixture (WebSight-heavy; mirrors the corpus plan in the design doc).
+# Default full-training mixture (WebSight-heavy; mirrors the corpus plan in the design doc). A
+# hand-set prior — sweep it (scripts/mixture_sweep.py) and pick by held-out val rather than trust it.
 _DEFAULT_MIX = [("websight", 0.55), ("webcode2m", 0.25), ("chartmimic", 0.1), ("swebench_mm", 0.1)]
-
-
-def _mix(n: int) -> Dataset:
-    return _Mixture(_DEFAULT_MIX, n)
-
 
 REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "synthetic": _synthetic,
@@ -87,11 +86,22 @@ REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "websight": _websight,
     "webcode2m": _webcode2m,
     "chartmimic": _chartmimic,
-    "mix": _mix,
 }
+CHOICES = [*REGISTRY, "mix"]
 
 
-def build_corpus(name: str, n: int) -> Dataset:
+def parse_mixture(spec: str) -> list[tuple[str, float]]:
+    """Parse a mixture string 'websight=0.6,webcode2m=0.4' into [(name, weight), ...]."""
+    pairs = []
+    for part in spec.split(","):
+        name, _, weight = part.partition("=")
+        pairs.append((name.strip(), float(weight)))
+    return pairs
+
+
+def build_corpus(name: str, n: int, mixture: list[tuple[str, float]] | None = None) -> Dataset:
+    if name == "mix":
+        return _Mixture(mixture or _DEFAULT_MIX, n)
     if name not in REGISTRY:
-        raise ValueError(f"unknown dataset {name!r}; choices: {', '.join(REGISTRY)}")
+        raise ValueError(f"unknown dataset {name!r}; choices: {', '.join(CHOICES)}")
     return REGISTRY[name](n)
