@@ -54,6 +54,28 @@ def _assert_backbone_loaded(model: nn.Module, missing_keys: list[str], base_llm:
         )
 
 
+def load_causal_lm(base_llm: str, device: str, dtype: torch.dtype) -> tuple[nn.Module, AutoTokenizer]:
+    """Load a frozen base causal LM + its tokenizer, quantization-aware (the single load path shared
+    by the adapter and the Stage-0 baselines, so the NVFP4 placement logic can't drift).
+
+    Quantized checkpoints (e.g. Laguna NVFP4) carry their own dtype + placement: load via device_map
+    and don't override dtype or call .to(). Plain checkpoints take the explicit dtype/.to() path.
+    Raises if real pretrained weights were missing (would leave the "frozen" backbone partly noise).
+    """
+    tok = AutoTokenizer.from_pretrained(base_llm, trust_remote_code=True)
+    cfg = AutoConfig.from_pretrained(base_llm, trust_remote_code=True)
+    load_kwargs = {"trust_remote_code": True, "output_loading_info": True}
+    if getattr(cfg, "quantization_config", None) is not None:
+        load_kwargs["device_map"] = device
+    else:
+        load_kwargs["dtype"] = dtype
+    llm, info = AutoModelForCausalLM.from_pretrained(base_llm, **load_kwargs)
+    if "dtype" in load_kwargs:  # plain checkpoint: move to device (quantized self-places)
+        llm = llm.to(device)
+    _assert_backbone_loaded(llm, info["missing_keys"], base_llm)
+    return llm, tok
+
+
 class VisualAdapter(nn.Module):
     """Frozen encoder + trainable projector + frozen causal LLM. Trains the projector only."""
 
@@ -69,19 +91,7 @@ class VisualAdapter(nn.Module):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = dtype or (torch.bfloat16 if self.device.startswith("cuda") else torch.float32)
         self.encoder = encoder
-        self.tok = AutoTokenizer.from_pretrained(base_llm, trust_remote_code=True)
-        # Quantized checkpoints (e.g. Laguna NVFP4) carry their own dtype + placement: load via
-        # device_map and don't override dtype or call .to(). Plain checkpoints take the explicit path.
-        cfg = AutoConfig.from_pretrained(base_llm, trust_remote_code=True)
-        load_kwargs = {"trust_remote_code": True, "output_loading_info": True}
-        if getattr(cfg, "quantization_config", None) is not None:
-            load_kwargs["device_map"] = self.device
-        else:
-            load_kwargs["dtype"] = dtype
-        self.llm, info = AutoModelForCausalLM.from_pretrained(base_llm, **load_kwargs)
-        if "dtype" in load_kwargs:  # plain checkpoint: move to device (quantized self-places)
-            self.llm = self.llm.to(self.device)
-        _assert_backbone_loaded(self.llm, info["missing_keys"], base_llm)
+        self.llm, self.tok = load_causal_lm(base_llm, self.device, dtype)
         self._add_image_token()  # <image> marker + subtoken-avg init, before the freeze below
         self.llm.eval()
         for p in self.llm.parameters():

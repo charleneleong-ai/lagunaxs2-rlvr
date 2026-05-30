@@ -108,6 +108,14 @@ CHOICES = [*REGISTRY, "mix"]
 # Code "kind" of each corpus's targets, for code-validity metrics; corpora absent here aren't scored.
 CORPUS_KIND = {"websight": "html", "webcode2m": "html", "design2code": "html", "chartmimic": "python"}
 
+# Per-kind instruction a model is asked to follow (None = swebench-style issue text). Keyed by the
+# values of CORPUS_KIND, so the corpus taxonomy and its task prompts live in one place.
+TASK_PROMPT: dict[str | None, str] = {
+    "html": "Write the HTML/CSS that renders this page.",
+    "python": "Write the matplotlib code for this chart.",
+    None: "Describe the software issue shown.",
+}
+
 _TITLE_PY = re.compile(r"""(?:set_title|suptitle|plt\.title)\(\s*['"]([^'"]+)['"]""")
 _TITLE_HTML = re.compile(r"<title>(.*?)</title>", re.I | re.S)
 _H1_HTML = re.compile(r"<h1[^>]*>(.*?)</h1>", re.I | re.S)

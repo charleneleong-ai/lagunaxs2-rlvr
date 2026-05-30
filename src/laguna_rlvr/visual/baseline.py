@@ -3,13 +3,30 @@
 Two no-adapter baselines over the frozen base LLM — `blind` (task prompt only) and tool-mediated
 (`GLM-OCR → text → Laguna`) — give the adapter's eventual numbers a floor and a bar to beat. See
 docs/specs/2026-05-30-stage-0-baseline-design.md.
+
+Staged GPU: GLM-OCR transcribes every image first and is freed before the base LLM loads, so the two
+multi-GB models never co-reside on the A100.
 """
 from __future__ import annotations
 
-import torch
-from transformers import AutoImageProcessor, AutoModelForImageTextToText
+import gc
+import os
 
+import torch
+import typer
+from transformers import AutoModelForImageTextToText, AutoProcessor
+
+from laguna_rlvr.visual.corpora import CORPUS_KIND, TASK_PROMPT, build_corpus
 from laguna_rlvr.visual.encoders import _REPOS  # canonical model-id registry (avoid a 2nd source of truth)
+from laguna_rlvr.visual.metrics import score_predictions
+from laguna_rlvr.visual.model import load_causal_lm
+
+_OCR_PROMPT = "Transcribe all text visible in this image, preserving order."
+_OCR_GEN_TOKENS = 48     # short transcription targets
+_CODE_GEN_TOKENS = 512   # code/HTML need room to form a parseable unit (matches the training label cap)
+_QA_GEN_TOKENS = 24      # multi-turn QA replies are short ("the title is …")
+
+app = typer.Typer(add_completion=False)
 
 
 @torch.no_grad()
@@ -17,17 +34,125 @@ def glm_ocr_transcribe(items: list, device: str = "cuda", max_new_tokens: int = 
                        model=None, proc=None) -> list[str]:
     """GLM-OCR reads each item's image (image -> OCR text). One transcript per item, in order.
 
-    Loads GLM-OCR once when `model`/`proc` are omitted, so calling this once with the full item list
-    is the cheap path (the staged-GPU harness frees it before loading Laguna). `items` are
-    (image, ...) tuples; only `it[0]` is read.
+    GLM-OCR is an image-text-to-text model: it's prompted with the image *plus* an instruction (via
+    the chat template), so the full `AutoProcessor` is required, not a bare image processor. Only the
+    generated continuation is decoded (the echoed prompt tokens are sliced off). Loads the model once
+    when `model`/`proc` are omitted, so one call with the full item list is the cheap path (the
+    staged-GPU harness frees it before loading Laguna). `items` are (image, ...) tuples; only `it[0]`.
     """
     if model is None:
         repo = _REPOS["glm_ocr"]
         model = AutoModelForImageTextToText.from_pretrained(repo, device_map=device).eval()
-        proc = AutoImageProcessor.from_pretrained(repo)
+        proc = AutoProcessor.from_pretrained(repo)
     out = []
     for it in items:
-        batch = proc(images=[it[0]], return_tensors="pt").to(model.device)
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": it[0]}, {"type": "text", "text": _OCR_PROMPT}]}]
+        batch = proc.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
+                                         return_dict=True, return_tensors="pt").to(model.device)
         gen = model.generate(**batch, max_new_tokens=max_new_tokens, do_sample=False)
-        out.append(proc.batch_decode(gen, skip_special_tokens=True)[0])
+        new = gen[:, batch["input_ids"].shape[1]:]  # drop the echoed prompt; keep the transcript
+        out.append(proc.batch_decode(new, skip_special_tokens=True)[0])
     return out
+
+
+def assemble_prompt(task: str, transcript: str | None) -> str:
+    """Build one base-LLM prompt. `blind` (transcript None) is the task alone — the text-only floor;
+    tool-mediated prepends the OCR transcript as the model's only window onto the image.
+    """
+    if transcript is None:
+        return task
+    return f"{transcript}\n\n{task}"
+
+
+@torch.no_grad()
+def text_generate(llm, tok, prompts: list[str], max_new_tokens: int = _CODE_GEN_TOKENS) -> list[str]:
+    """Greedy text-only completion of each prompt (no vision splice). Returns only the continuation —
+    the echoed prompt tokens are stripped so the prediction is the model's answer, not the question.
+    """
+    out = []
+    for prompt in prompts:
+        ids = tok(prompt, return_tensors="pt").input_ids.to(llm.device)
+        gen = llm.generate(input_ids=ids, max_new_tokens=max_new_tokens, do_sample=False)
+        out.append(tok.decode(gen[0, ids.shape[1]:], skip_special_tokens=True))
+    return out
+
+
+@torch.no_grad()
+def text_chat(llm, tok, turn_texts: list[str], max_new_tokens: int = _QA_GEN_TOKENS) -> list[str]:
+    """Multi-turn text-only chat: one reply per turn, each conditioned on all prior turns + replies.
+    The text-only mirror of `VisualAdapter.chat` (ids instead of spliced embeds) — the blind/OCR
+    engine for the multi-turn QA axis.
+    """
+    ctx, replies = None, []
+    for text in turn_texts:
+        ids = tok(text, return_tensors="pt").input_ids.to(llm.device)
+        ctx = ids if ctx is None else torch.cat([ctx, ids], dim=1)
+        gen = llm.generate(input_ids=ctx, max_new_tokens=max_new_tokens, do_sample=False)
+        reply_ids = gen[:, ctx.shape[1]:]
+        replies.append(tok.decode(reply_ids[0], skip_special_tokens=True))
+        ctx = torch.cat([ctx, reply_ids], dim=1)
+    return replies
+
+
+def run_axis_a(dataset: str, baselines: list[str], n_eval: int, base_llm: str,
+               device: str = "cuda") -> dict[str, dict[str, float]]:
+    """Single-turn generation panel: each baseline's predictions on `dataset`, scored by corpus kind.
+
+    Staged GPU — OCR-transcribe all images (load + free GLM-OCR) before the base LLM loads, so the
+    two models never co-reside. Returns {baseline_name: {metric: value}}.
+    """
+    items = list(build_corpus(dataset, n_eval))
+    refs = [it[1] for it in items]
+    kind = CORPUS_KIND.get(dataset)
+    kinds = [kind] * len(items)
+    task = TASK_PROMPT.get(kind, TASK_PROMPT[None])
+    max_new = _OCR_GEN_TOKENS if kind is None else _CODE_GEN_TOKENS
+
+    transcripts = None
+    if "ocr" in baselines:  # stage 1: GLM-OCR reads every image, then is dropped (local var) + freed
+        transcripts = glm_ocr_transcribe(items, device=device)
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    llm, tok = load_causal_lm(base_llm, device, torch.bfloat16)  # stage 2: base Laguna, alone on-device
+    results = {}
+    for name in baselines:
+        per_item = transcripts if name == "ocr" else [None] * len(items)  # blind = no transcript
+        prompts = [assemble_prompt(task, t) for t in per_item]
+        preds = text_generate(llm, tok, prompts, max_new_tokens=max_new)
+        results[name] = score_predictions(preds, refs, kinds, prefix=f"baseline/{name}")
+    return results
+
+
+def _print_results(dataset: str, results: dict[str, dict[str, float]]) -> None:
+    for name, metrics in results.items():
+        body = " ".join(f"{k.rsplit('/', 1)[-1]}={v:.3f}" for k, v in sorted(metrics.items()))
+        print(f"RESULT dataset={dataset} baseline={name} {body}", flush=True)
+
+
+@app.command()
+def baseline(
+    dataset: str = typer.Option("design2code", help="corpus to evaluate (Axis A)"),
+    baselines: str = typer.Option("blind,ocr", help="comma list: blind, ocr"),
+    base: str = typer.Option(..., help="base LLM checkpoint (frozen, no adapter)"),
+    n_eval: int = typer.Option(64, help="held-out items to score"),
+    device: str = typer.Option("cuda"),
+    use_wandb: bool = typer.Option(False, "--wandb/--no-wandb", help="log to Weights & Biases"),
+) -> None:
+    """Stage-0 baseline panel: frozen base LLM on a corpus, blind vs OCR-mediated."""
+    names = [b.strip() for b in baselines.split(",") if b.strip()]
+    results = run_axis_a(dataset, names, n_eval, base, device)
+    _print_results(dataset, results)
+    if use_wandb:
+        import wandb
+        if not os.environ.get("WANDB_API_KEY"):
+            os.environ.setdefault("WANDB_MODE", "offline")
+        run = wandb.init(project="laguna-mm-adapter", name=f"baseline-{dataset}",
+                         config={"base": base, "dataset": dataset, "baselines": names, "n_eval": n_eval})
+        run.log({k: v for m in results.values() for k, v in m.items()})
+        run.finish()
+
+
+if __name__ == "__main__":
+    app()
