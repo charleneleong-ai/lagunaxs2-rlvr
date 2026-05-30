@@ -100,7 +100,10 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     val_loader = DataLoader(val_ds, batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
     val_every = max(20, max_steps // 10)
 
-    out_dir = Path(out) / f"{encoder}__{Path(base).name}"
+    # Scope the run identity by dataset too — otherwise different corpora on the same backbone share
+    # out_dir/resume.pt and the W&B run, so a crashed run is wrongly resumed by the next (caught 2026-05).
+    run_name = f"{encoder}__{Path(base).name}__{dataset}"
+    out_dir = Path(out) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt = out_dir / "projector.pt"
 
@@ -119,7 +122,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     if use_wandb:
         if not os.environ.get("WANDB_API_KEY"):
             os.environ.setdefault("WANDB_MODE", "offline")
-        run = wandb.init(project="laguna-mm-adapter", name=f"{encoder}__{Path(base).name}",
+        run = wandb.init(project="laguna-mm-adapter", name=run_name,
                          id=resume_id, resume="allow" if resume_id else None,
                          config={"base": base, "encoder": encoder, "projector": projector_kind,
                                  "dataset": dataset, "lr": lr, "max_steps": max_steps,
@@ -175,7 +178,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                                 "gpu_mean_util_pct": gpu.mean_util_pct})
             run.finish()
         log_experiment(
-            tag="mm_adapter", config_name=f"{encoder}__{Path(base).name}",
+            tag="mm_adapter", config_name=run_name,
             score=last_loss, steps=step, status=status,
             description=f"visual projector ({projector_kind}) on {base} [{dataset}]",
             wandb_url=run.url if run else "",
