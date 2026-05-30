@@ -94,6 +94,12 @@ split gives the live `val/loss`. **Charts** (Chart2Code-160k, ChartMimic) are a 
 until their schema/loader is confirmed. Holdout discipline: don't train on SWE-bench M `test` if it will
 be the agentic eval.
 
+**Full training uses the mix, not one corpus.** `--dataset mix` blends the training corpora at weights
+(`_DEFAULT_MIX` in `corpora.py`: WebSight 0.6 / WebCode2M 0.3 / swebench_mm 0.1) into one interleaved,
+indexable dataset — the projector-stage analog of the report's pre-training data mixture (§3.2.3 AutoMixer /
+Table 4), so the model learns the full mix in a single run. Single-corpus runs (`--dataset websight`) stay
+available for ablations.
+
 ## Guardrails (already in place)
 
 - VRAM-budget gate — `mm_adapter_plan.py` must print `GPU guardrails: pass` before any heavyweight run;

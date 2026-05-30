@@ -36,11 +36,47 @@ def _webcode2m(n: int) -> Dataset:
     return HFImageTextDataset("xcodemind/webcode2m", n=n)  # real webpage design -> code
 
 
+class _Mixture(Dataset):
+    """Weighted blend of corpora for full training — builds ~n×weight examples from each and
+    concatenates them into one indexable dataset, so the model sees the corpora interleaved (the
+    seeded 90/10 train/val split + DataLoader shuffle then mix them). This is the projector-stage
+    analog of the report's pre-training data mixture (§3.2.3 AutoMixer / Table 4): the model learns
+    the full corpus mix in one run rather than one dataset at a time.
+
+    Note: swebench_mm is fixed-size (612) and ignores its quota — negligible when the mix is large.
+    """
+
+    def __init__(self, specs: list[tuple[str, float]], n: int):
+        total = sum(w for _, w in specs)
+        self._datasets: list[Dataset] = []
+        self._index: list[tuple[int, int]] = []
+        for di, (name, weight) in enumerate(specs):
+            ds = build_corpus(name, max(1, round(n * weight / total)))
+            self._datasets.append(ds)
+            self._index += [(di, j) for j in range(len(ds))]
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    def __getitem__(self, i: int):
+        di, j = self._index[i]
+        return self._datasets[di][j]
+
+
+# Default full-training mixture (WebSight-heavy; mirrors the corpus plan in the design doc).
+_DEFAULT_MIX = [("websight", 0.6), ("webcode2m", 0.3), ("swebench_mm", 0.1)]
+
+
+def _mix(n: int) -> Dataset:
+    return _Mixture(_DEFAULT_MIX, n)
+
+
 REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "synthetic": _synthetic,
     "swebench_mm": _swebench_mm,
     "websight": _websight,
     "webcode2m": _webcode2m,
+    "mix": _mix,
 }
 
 
