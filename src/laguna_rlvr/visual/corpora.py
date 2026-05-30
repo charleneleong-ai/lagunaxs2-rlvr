@@ -136,6 +136,17 @@ def extract_needle(label: str, kind: str | None) -> str | None:
     return None
 
 
+# The QA read-question per kind — paired with `extract_needle` (it asks for the needle the extractor
+# pulls), so it lives beside the taxonomy rather than in the QA harness (cf. TASK_PROMPT).
+_READ_Q = {"python": "What is the title of this chart?",
+           "html": "What is the title or main heading of this page?"}
+_READ_Q_DEFAULT = "What text is shown in this image?"
+
+
+def read_question(kind: str | None) -> str:
+    return _READ_Q.get(kind, _READ_Q_DEFAULT)
+
+
 def parse_mixture(spec: str) -> list[tuple[str, float]]:
     """Parse a mixture string 'websight=0.6,webcode2m=0.4' into [(name, weight), ...]."""
     pairs = []

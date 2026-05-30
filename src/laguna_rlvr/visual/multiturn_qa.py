@@ -1,41 +1,198 @@
-"""Simulated, verifiable multi-turn multimodal QA eval.
+"""Verifiable multi-turn multimodal QA — does reading + vision-as-tool-observation persist across turns?
 
-No off-the-shelf multi-turn *multimodal* QA set exists for our (code/UI) domain with ground truth, so
-we synthesize one from SyntheticOCR — we *know* each image's text. Each episode shows two images,
-asks to read each, then a text-only follow-up that requires recalling the FIRST image. We score
-per-turn reading (`qa/metrics/accuracy`) AND cross-turn memory (`qa/metrics/recall`) by substring match.
+Two episode sources:
+- **synthetic** (default): toy SyntheticOCR images whose text we know — a fast, offline, in-training
+  sanity check (train.py's qa_eval). Measures whether the single-turn projector transfers to multi-turn.
+- **mixture**: episodes grounded in the real training corpora (the same screenshots/charts the model
+  faces), with verifiability preserved by a needle extracted from each paired label (chart/page title
+  via `extract_needle`). Persisted to `data/multiturn_qa.jsonl` so the benchmark is fixed + inspectable;
+  images are re-fetched by `build_corpus(corpus)[idx]` (stable row order), so the manifest stays tiny.
 
-This measures whether a *single-turn-trained* projector transfers to multi-turn (agentic) use via the
-frozen LLM + `<image>` splice. A gap motivates Stage-2 multi-turn training (agentic SFT, report §4.3.3).
+Each 3-turn episode reads image A, reads image B, then a text-only follow-up that must recall A's
+needle. Scored `qa/metrics/accuracy` (per-turn reading) + `qa/metrics/recall` (cross-turn memory) by
+substring (the reply is verbose; substring avoids CER over-penalizing). Baselines share one scoring
+core: adapter (vision splice), blind (no images — the floor), tool-mediated (GLM-OCR transcript → chat).
 """
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
+from laguna_rlvr.visual.baseline import _QA_GEN_TOKENS, glm_ocr_transcribe, staged_base_llm, text_chat
+from laguna_rlvr.visual.corpora import CORPUS_KIND, build_corpus, extract_needle, read_question
 from laguna_rlvr.visual.data import render_text
-from laguna_rlvr.visual.model import _PROMPT, Turn, VisualAdapter
+from laguna_rlvr.visual.model import IMAGE_TOKEN, Turn, VisualAdapter
+
+_MANIFEST = Path("data/multiturn_qa.jsonl")
+_QA_CORPORA = ["chartmimic", "design2code", "websight"]  # needle-bearing kinds (python / html)
+_PER_CORPUS = 64   # rows scanned per corpus when building the manifest
+_RECALL_Q = "What was shown in the first image? Answer with its exact title or text."
+
+
+@dataclass
+class QARef:
+    """A pointer to one corpus row + its extracted needle (the answer to read/recall)."""
+    corpus: str
+    idx: int
+    needle: str
+    kind: str | None
+
+
+@dataclass
+class Episode:
+    a: QARef
+    b: QARef
 
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s.lower()).strip()
 
 
-def evaluate_multiturn_qa(adapter: VisualAdapter, n: int = 16, seed: int = 0,
-                          max_new_tokens: int = 24) -> dict[str, float]:
-    """Run n 3-turn episodes (read img A, read img B, recall img A) and score by substring match."""
-    hits = total = recall_hits = 0
-    for i in range(n):
-        a, b = f"invoice {seed + i}", f"total {seed + 7 * i + 3}"  # distinct ground truth per episode
-        turns = [
-            Turn(_PROMPT, [render_text(a, seed=seed + i)]),
-            Turn(_PROMPT, [render_text(b, seed=seed + i + 1000)]),  # +1000: distinct render from A
-            Turn("What text was in the first image?"),  # cross-turn recall (text-only turn)
-        ]
-        r1, r2, r3 = adapter.chat(turns, max_new_tokens=max_new_tokens)
-        # substring (not CER): the reply is verbose ("the text is …"); we score whether it CONTAINS
-        # the ground truth, which CER would wrongly penalize as edits.
-        for expected, reply in ((a, r1), (b, r2)):
+# ── episodes + manifest ──────────────────────────────────────────────────────────────────────────
+
+def save_manifest(episodes: list[Episode], path: Path = _MANIFEST) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps({"a": asdict(ep.a), "b": asdict(ep.b)}) for ep in episodes))
+
+
+def load_manifest(path: Path = _MANIFEST) -> list[Episode]:
+    lines = (ln for ln in path.read_text().splitlines() if ln.strip())
+    return [Episode(QARef(**d["a"]), QARef(**d["b"])) for d in map(json.loads, lines)]
+
+
+def synthetic_episodes(n: int = 16, seed: int = 0) -> list[Episode]:
+    """Toy episodes from SyntheticOCR — offline sanity; the needle *is* the rendered text."""
+    return [Episode(QARef("synthetic", seed + i, f"invoice {seed + i}", None),
+                    QARef("synthetic", seed + i + 1000, f"total {seed + 7 * i + 3}", None))
+            for i in range(n)]
+
+
+def mixture_episodes(n: int, corpora: list[str] = _QA_CORPORA, per_corpus: int = _PER_CORPUS) -> list[Episode]:
+    """Episodes from the real corpora: scan rows, keep those with a clean needle, pair them up."""
+    refs: list[QARef] = []
+    for corpus in corpora:
+        kind = CORPUS_KIND.get(corpus)
+        ds = build_corpus(corpus, per_corpus)
+        for idx in range(len(ds)):
+            if needle := extract_needle(ds[idx][1], kind):
+                refs.append(QARef(corpus, idx, needle, kind))
+    return [Episode(refs[2 * i], refs[2 * i + 1]) for i in range(min(n, len(refs) // 2))]
+
+
+def load_or_build_episodes(source: str, n: int, seed: int, manifest: Path = _MANIFEST) -> list[Episode]:
+    """`seed` reshuffles only the synthetic source; the mixture is deterministic (the manifest *is*
+    the fixed benchmark — re-read if present, else built once from the corpus scan and persisted)."""
+    if source == "synthetic":
+        return synthetic_episodes(n, seed)
+    if manifest.exists():
+        return load_manifest(manifest)[:n]
+    episodes = mixture_episodes(n)
+    save_manifest(episodes, manifest)
+    return episodes
+
+
+# ── image fetch (cached, re-fetches real rows by index) ────────────────────────────────────────────
+
+def _image_fetcher(episodes: list[Episode]):
+    """Return `fetch(ref) -> image`, building each real corpus once at `_PER_CORPUS` rows — the same
+    size `mixture_episodes` builds at, so the on-disk corpus cache hits instead of re-streaming."""
+    cache: dict = {}
+
+    def fetch(ref: QARef):
+        if ref.corpus == "synthetic":
+            return render_text(ref.needle, seed=ref.idx)
+        if ref.corpus not in cache:
+            cache[ref.corpus] = build_corpus(ref.corpus, _PER_CORPUS)
+        return cache[ref.corpus][ref.idx][0]
+
+    return fetch
+
+
+# ── per-episode runners (one reply list per episode) ───────────────────────────────────────────────
+
+def _turn_texts(ep: Episode) -> list[str]:
+    return [read_question(ep.a.kind), read_question(ep.b.kind), _RECALL_Q]
+
+
+def adapter_runner(adapter: VisualAdapter, fetch, max_new_tokens: int = _QA_GEN_TOKENS):
+    """Vision-splice path: each read turn carries the real image at an <image> marker."""
+    def run(ep: Episode) -> list[str]:
+        q1, q2, q3 = _turn_texts(ep)
+        turns = [Turn(f"{IMAGE_TOKEN}\n{q1}", [fetch(ep.a)]),
+                 Turn(f"{IMAGE_TOKEN}\n{q2}", [fetch(ep.b)]),
+                 Turn(q3)]
+        return adapter.chat(turns, max_new_tokens=max_new_tokens)
+    return run
+
+
+def blind_runner(llm, tok, max_new_tokens: int = _QA_GEN_TOKENS):
+    """Floor: text-only chat, no images — how much is answerable without seeing anything."""
+    def run(ep: Episode) -> list[str]:
+        return text_chat(llm, tok, _turn_texts(ep), max_new_tokens=max_new_tokens)
+    return run
+
+
+def ocr_runner(llm, tok, transcripts: dict[tuple[str, int], str], max_new_tokens: int = _QA_GEN_TOKENS):
+    """Tool-mediated: each read turn carries the image's GLM-OCR transcript (pre-computed, keyed by
+    (corpus, idx) so the staged-GPU harness transcribes every image once before the base LLM loads)."""
+    def run(ep: Episode) -> list[str]:
+        q1, q2, q3 = _turn_texts(ep)
+        ta, tb = transcripts[(ep.a.corpus, ep.a.idx)], transcripts[(ep.b.corpus, ep.b.idx)]
+        return text_chat(llm, tok, [f"{ta}\n{q1}", f"{tb}\n{q2}", q3], max_new_tokens=max_new_tokens)
+    return run
+
+
+def transcribe_episodes(episodes: list[Episode], fetch, device: str = "cuda") -> dict[tuple[str, int], str]:
+    """GLM-OCR transcript per distinct image across all episodes (deduped), keyed by (corpus, idx)."""
+    refs = {(r.corpus, r.idx): r for ep in episodes for r in (ep.a, ep.b)}
+    texts = glm_ocr_transcribe([(fetch(r),) for r in refs.values()], device=device)
+    return dict(zip(refs, texts))
+
+
+# ── scoring ────────────────────────────────────────────────────────────────────────────────────────
+
+def run_qa(run_episode, episodes: list[Episode], prefix: str = "qa") -> dict[str, float]:
+    """Aggregate per-turn reading accuracy + cross-turn recall over episodes (substring match).
+    `prefix` namespaces the keys (`qa` for the adapter; `qa/<baseline>` for the baseline panel)."""
+    hits = total = recall = 0
+    for ep in episodes:
+        r1, r2, r3 = run_episode(ep)
+        for ref, reply in ((ep.a, r1), (ep.b, r2)):
             total += 1
-            hits += _norm(expected) in _norm(reply)
-        recall_hits += _norm(a) in _norm(r3)
-    return {"qa/metrics/accuracy": hits / max(total, 1), "qa/metrics/recall": recall_hits / max(n, 1)}
+            hits += _norm(ref.needle) in _norm(reply)
+        recall += _norm(ep.a.needle) in _norm(r3)
+    return {f"{prefix}/metrics/accuracy": hits / max(total, 1),
+            f"{prefix}/metrics/recall": recall / max(len(episodes), 1)}
+
+
+def evaluate_multiturn_qa(adapter: VisualAdapter, n: int = 16, seed: int = 0,
+                          max_new_tokens: int = _QA_GEN_TOKENS, *, source: str = "synthetic",
+                          manifest: Path = _MANIFEST) -> dict[str, float]:
+    """Adapter multi-turn QA. `source="synthetic"` (default) = fast offline sanity used in training;
+    `source="mixture"` = the real-corpora benchmark (built + persisted to `manifest` on first run)."""
+    episodes = load_or_build_episodes(source, n, seed, manifest)
+    fetch = _image_fetcher(episodes)
+    return run_qa(adapter_runner(adapter, fetch, max_new_tokens), episodes)
+
+
+def run_multiturn_qa_panel(baselines: list[str], n_eval: int, base_llm: str,
+                           device: str = "cuda") -> dict[str, dict[str, float]]:
+    """Stage-0 QA panel over the real-mixture manifest: blind + OCR-mediated base LLM (staged GPU —
+    every deduped episode image is transcribed before the base LLM loads). The adapter QA row comes
+    from `evaluate_multiturn_qa(source="mixture")`."""
+    episodes = load_or_build_episodes("mixture", n_eval, 0)
+    fetch = _image_fetcher(episodes)
+    transcribe = (lambda: transcribe_episodes(episodes, fetch, device=device)) if "ocr" in baselines else None
+    transcripts, llm, tok = staged_base_llm(base_llm, device, transcribe)
+    panel = {}
+    for name in baselines:
+        if name == "blind":
+            run = blind_runner(llm, tok)
+        elif name == "ocr":
+            run = ocr_runner(llm, tok, transcripts)
+        else:
+            continue
+        panel[name] = run_qa(run, episodes, prefix=f"qa/{name}")
+    return panel
