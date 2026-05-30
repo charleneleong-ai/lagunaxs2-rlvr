@@ -27,7 +27,7 @@ train_projector = true
 [training]
 stage = "projector_sft"
 micro_batch_size = 1
-gradient_accumulation_steps = 16
+gradient_accumulation_steps = 8   # more weight updates per forward than 16 (faster convergence, still smoothed)
 learning_rate = 0.0001
 max_steps = 1000
 lora_enabled = false
@@ -39,4 +39,6 @@ reserve_vram_gb = 6
 [mixture]
 # Weights for `--dataset mix` (override at the CLI with --mixture). A hand-set prior — sweep it
 # (scripts/mixture_sweep.py) and pick by held-out val rather than trust these numbers.
-weights = { websight = 0.55, webcode2m = 0.25, chartmimic = 0.1, swebench_mm = 0.1 }
+# synthetic (SyntheticOCR) is the OCR anchor: a kind=None transcription target that keeps the
+# projector's readout from collapsing into the code objective (the lqe323t4 OCR-starvation). Required.
+weights = { websight = 0.45, webcode2m = 0.25, chartmimic = 0.1, swebench_mm = 0.1, synthetic = 0.1 }
