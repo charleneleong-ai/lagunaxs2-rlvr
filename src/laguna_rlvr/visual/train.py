@@ -101,7 +101,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           seed: int = DEFAULT_SEED, dataset: str = "synthetic", use_wandb: bool = True,
           resume: bool = True, mixture: str = "", name_suffix: str = "",
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
-          qa_eval: bool = False, description: str = "") -> Path:
+          qa_eval: bool = True, description: str = "", init_projector: str = "") -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -154,6 +154,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         opt.load_state_dict(state["opt"])
         start_step, resume_id = state["step"], state.get("wandb_id")
         print(f"resuming from step {start_step}/{max_steps}", flush=True)
+    elif init_projector:  # warm-start the projector from a prior best.pt, fresh optimizer + step 0
+        adapter.projector.load_state_dict(torch.load(init_projector, map_location=adapter.llm.device))
+        print(f"warm-started projector from {init_projector} (fresh optimizer, step 0)", flush=True)
 
     # Offline when no WANDB_API_KEY (still produces a local trace to sync later); online otherwise.
     run = None
@@ -320,11 +323,12 @@ def main(
     eval_dataset: str = typer.Option("", help="fixed held-out eval corpus, e.g. design2code (logs eval/loss)"),
     patience: int = typer.Option(3, help="early-stop after this many evals without val improvement"),
     min_delta: float = typer.Option(1e-3, help="min val/loss decrease to count as an improvement"),
-    qa_eval: bool = typer.Option(False, "--qa-eval/--no-qa-eval", help="multi-turn multimodal QA probe (slow)"),
+    qa_eval: bool = typer.Option(True, "--qa-eval/--no-qa-eval", help="multi-turn multimodal QA probe (slow)"),
     description: str = typer.Option("", help="this run's hypothesis/intent — leads the W&B run notes"),
+    init_projector: str = typer.Option("", help="warm-start the projector from a prior best.pt (fresh optimizer)"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
-          resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description)
+          resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector)
 
 
 if __name__ == "__main__":
