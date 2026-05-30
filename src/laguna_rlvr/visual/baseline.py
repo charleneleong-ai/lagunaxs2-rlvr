@@ -135,6 +135,25 @@ def _print_results(dataset: str, results: dict[str, dict[str, float]]) -> None:
         print(f"RESULT dataset={dataset} baseline={name} {body}", flush=True)
 
 
+def _log_wandb(run, panels: dict[str, dict[str, dict[str, float]]]) -> None:
+    """Log each axis as a baseline×metric comparison Table (rows = baselines, cols = short metric
+    names) — so blind vs OCR read off one view, not scattered nested scalars — plus the flat scalars
+    so a metric trends across runs (chartmimic → design2code → the adapter)."""
+    import wandb
+    flat: dict[str, float] = {}
+    for axis, panel in panels.items():
+        if not panel:
+            continue
+        cols = sorted({k.rsplit("/", 1)[-1] for m in panel.values() for k in m})
+        table = wandb.Table(columns=["baseline", *cols])
+        for name, metrics in panel.items():
+            short = {k.rsplit("/", 1)[-1]: v for k, v in metrics.items()}
+            table.add_data(name, *(short.get(c) for c in cols))
+            flat.update(metrics)
+        run.log({f"{axis}/summary": table})
+    run.log(flat)
+
+
 @app.command()
 def baseline(
     dataset: str = typer.Option("design2code", help="corpus to evaluate (Axis A)"),
@@ -162,7 +181,7 @@ def baseline(
             os.environ.setdefault("WANDB_MODE", "offline")
         run = wandb.init(project="laguna-mm-adapter", name=f"baseline-{dataset}",
                          config={"base": base, "dataset": dataset, "baselines": names, "n_eval": n_eval})
-        run.log({k: v for panel in (axis_a, axis_b) for m in panel.values() for k, v in m.items()})
+        _log_wandb(run, {dataset: axis_a, "multiturn-qa": axis_b})
         run.finish()
 
 
