@@ -11,9 +11,9 @@ max_sequence_length = 8192
 
 [modality]
 kind = "audio"
-encoder_id = "openai/whisper-small"
+encoder_id = "openai/whisper-large-v3"
 encoder_role = "speech_context_encoder"
-fallback_encoder_id = "openai/whisper-base"
+fallback_encoder_id = "openai/whisper-small"
 freeze_encoder = true
 
 [adapter]

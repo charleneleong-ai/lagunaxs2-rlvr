@@ -80,7 +80,7 @@ def evaluate(base: str, ckpt: str, modality: str = "image", encoder: str | None 
              n_eval: int = 64, pool: int | None = None, projector_kind: str = "linear",
              baseline: bool = True, full: bool = False) -> dict:
     if modality == "audio":
-        name = encoder or "whisper_small"
+        name = encoder or "whisper_large"
         enc = load_audio_encoder(name, pool=pool or 8)
         ds = LibriSpeechASR(n=n_eval, split="eval", source="full" if full else "dummy")
         metric, metric_name, prompt = wer, "wer", _AUDIO_PROMPT

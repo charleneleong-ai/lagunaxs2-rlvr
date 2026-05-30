@@ -19,7 +19,7 @@ Debugged on the small Qwen base here; swappable to NVFP4 Laguna on the 80GB GPU,
 | `Projector` (d_in→d_llm, + pooling) | `src/laguna_rlvr/visual/projector.py` | **reuse as-is** (audio `d_enc` is just a different `d_in`) |
 | `VisualAdapter` (encode→project→prepend→frozen LLM→masked CE; `transcribe()`) | `src/laguna_rlvr/visual/model.py` | **reuse** — it depends only on an `Encoder` with `.encode()/.d_enc`, not on images |
 | Train loop / CER-WER eval / GPU + quant-load path | `mm/train.py`, `mm/eval.py` | **reuse**, with `--modality audio` selecting the audio encoder + data |
-| Config guardrails (`AdapterPlan`, `modality` field) | `src/laguna_rlvr/mm_adapter.py` | **reuse** — `modality.kind="audio"`, `encoder_id="openai/whisper-small"` |
+| Config guardrails (`AdapterPlan`, `modality` field) | `src/laguna_rlvr/mm_adapter.py` | **reuse** — `modality.kind="audio"`, `encoder_id="openai/whisper-large-v3"` |
 | **Audio encoder** | new: `src/laguna_rlvr/visual/audio_encoders.py` | the only genuinely new component (~40 lines) |
 | **Audio data** | new: `visual/audio_data.py` | small real ASR slice (gold transcripts) |
 
@@ -39,7 +39,7 @@ The `Encoder` interface (`.encode(batch) -> (B, N/pool, d_enc)`, `.d_enc`, `.poo
 
 ## Components
 
-- **`audio_encoders.py`** — `load_audio_encoder(name="whisper_small", pool=k) -> Encoder`. Loads `openai/whisper-small`, takes `model.get_encoder()` (frozen, `eval()`, `requires_grad_(False)`), exposes `WhisperProcessor` and `d_enc = encoder.config.d_model` (whisper-small = 768; base = 512). `.encode(audios)` runs the feature extractor (16 kHz log-mel) → encoder → `last_hidden_state` (B, ~1500, d_enc) → `mean_pool(·, k)` (reuse `projector.mean_pool`; pool hard, e.g. k=8–16, since frame count is large).
+- **`audio_encoders.py`** — `load_audio_encoder(name="whisper_large", pool=k) -> Encoder`. Loads `openai/whisper-large-v3`, takes `model.get_encoder()` (frozen, `eval()`, `requires_grad_(False)`), exposes `WhisperProcessor` and `d_enc = encoder.config.d_model` (whisper-large-v3 = 1280; small = 768; tiny = 384 for CI). `.encode(audios)` runs the feature extractor (16 kHz log-mel) → encoder → `last_hidden_state` (B, ~1500, d_enc) → `mean_pool(·, k)` (reuse `projector.mean_pool`; pool hard, e.g. k=8–16, since frame count is large).
 - **`audio_data.py`** — wrap a tiny real ASR set with gold transcripts, e.g. `hf-internal-testing/librispeech_asr_dummy` (~9 MB, fits the disk) → `(waveform, transcript)` pairs. Self-verifying (the dataset's gold transcript is the label). Synthetic TTS is a documented alternative for infinite/controlled data but adds a TTS dep — deferred.
 - **Reused:** `VisualAdapter`, `train.py`, `eval.py`, `Projector`, `mm_adapter` guardrails.
 
@@ -49,7 +49,7 @@ Primary metric **WER** (word error rate) — the speech analog of the visual CER
 
 ## Build sequence (mirrors the visual adapter)
 
-1. `audio_encoders.py` + smoke (`load_audio_encoder('whisper_small').encode([wav])` → shape, record `d_enc`).
+1. `audio_encoders.py` + smoke (`load_audio_encoder('whisper_large').encode([wav])` → shape, record `d_enc`; CI uses `whisper_tiny`).
 2. `audio_data.py` + a tiny ASR slice; `wer()` in `metrics.py`.
 3. Generalize the trainer's encoder/data selection behind `--modality audio` (no change to `VisualAdapter`).
 4. Overfit-one-batch test on Qwen3-0.6B (loss halves) — the wiring proof, identical shape to the visual test.

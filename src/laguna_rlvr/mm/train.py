@@ -39,7 +39,7 @@ def _setup(modality: str, encoder: str | None, pool: int, n_train: int, full: bo
     """(frozen encoder, dataset, prompt) for a modality. Prompt None -> the default image prompt."""
     if modality == "audio":
         ds = LibriSpeechASR(n=n_train, split="train", source="full" if full else "dummy")
-        return load_audio_encoder(encoder or "whisper_small", pool=pool), ds, _AUDIO_PROMPT
+        return load_audio_encoder(encoder or "whisper_large", pool=pool), ds, _AUDIO_PROMPT
     return load_encoder(encoder or "glm_ocr", pool=pool), SyntheticOCR(n=n_train), None
 
 

@@ -8,9 +8,10 @@ from transformers import WhisperForConditionalGeneration, WhisperProcessor
 from laguna_rlvr.mm.projector import mean_pool
 
 WHISPER_REPOS = {
-    "whisper_tiny": "openai/whisper-tiny",    # 384-d, debug/smoke
-    "whisper_base": "openai/whisper-base",    # 512-d
-    "whisper_small": "openai/whisper-small",  # 768-d, the spec default
+    "whisper_tiny": "openai/whisper-tiny",          # 384-d, CI/smoke only
+    "whisper_base": "openai/whisper-base",          # 512-d
+    "whisper_small": "openai/whisper-small",        # 768-d
+    "whisper_large": "openai/whisper-large-v3",     # 1280-d, the default speech front-end
 }
 _SAMPLE_RATE = 16_000  # Whisper's fixed input rate; the feature extractor resamples to it
 
@@ -40,7 +41,7 @@ class AudioEncoder:
         return mean_pool(out.last_hidden_state, self.pool)  # (B, ~1500/pool, d_enc)
 
 
-def load_audio_encoder(name: str = "whisper_small", pool: int = 8,
+def load_audio_encoder(name: str = "whisper_large", pool: int = 8,
                        dtype: torch.dtype | None = None, device: str | None = None) -> AudioEncoder:
     if name not in WHISPER_REPOS:
         raise ValueError(f"unknown audio encoder {name!r}; choose from {list(WHISPER_REPOS)}")
