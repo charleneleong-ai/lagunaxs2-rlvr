@@ -1,5 +1,5 @@
 import torch
-from laguna_rlvr.visual.projector import Projector, mean_pool
+from laguna_rlvr.mm.projector import Projector, mean_pool
 
 
 def test_linear_projector_maps_dims():

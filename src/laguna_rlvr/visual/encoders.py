@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 from transformers import AutoImageProcessor, AutoModelForImageTextToText
 
-from laguna_rlvr.visual.projector import mean_pool
+from laguna_rlvr.mm.projector import mean_pool
 
 _REPOS = {"glm_ocr": "zai-org/GLM-OCR", "qwen3_vl": "Qwen/Qwen3-VL-4B-Instruct"}
 
@@ -38,8 +38,8 @@ class Encoder:
         case for synthetic OCR) this gives a clean (B, N/pool, d_enc) batch; truly
         variable-sized inputs would need padding, which we leave to the caller.
         """
-        device = next(self.tower.parameters()).device
-        dtype = next(self.tower.parameters()).dtype
+        p = next(self.tower.parameters())
+        device, dtype = p.device, p.dtype
         feats = []
         for img in images:
             batch = self.processor(images=[img], return_tensors="pt").to(device)
