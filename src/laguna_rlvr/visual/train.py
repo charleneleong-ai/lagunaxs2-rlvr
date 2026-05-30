@@ -144,18 +144,23 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     try:
         with monitor:
             opt.zero_grad()
+            window = None  # GPU-side running sum of micro-losses → mean over the effective batch
             while step < max_steps:
                 for images, labels in loader:
                     loss = adapter(images, labels).loss / grad_accum
                     loss.backward()
+                    window = loss.detach() if window is None else window + loss.detach()
                     if (step + 1) % grad_accum == 0:
                         opt.step()
                         opt.zero_grad()
-                    if step % 20 == 0:  # .item() forces a CUDA sync — only on the log cadence
-                        cur = loss.item() * grad_accum
-                        print(f"step {step}/{max_steps} loss {cur:.4f}", flush=True)
+                        # log the effective-batch mean loss per optimizer step — smoother than a
+                        # single micro-example, and one CUDA sync per step rather than every micro-step.
+                        last_loss = window.item()
+                        window = None
                         if run:
-                            run.log({"train/loss": cur}, step=step)
+                            run.log({"train/loss": last_loss}, step=step)
+                        if (step + 1) % (20 * grad_accum) == 0:
+                            print(f"step {step}/{max_steps} loss {last_loss:.4f}", flush=True)
                     if step % val_every == 0:
                         last_val = _val_loss(adapter, val_loader)
                         print(f"  val loss {last_val:.4f}", flush=True)
@@ -166,7 +171,6 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                         _save_resume(resume_ckpt, adapter, opt, step, run)
                     if step >= max_steps:
                         break
-            last_loss = loss.item() * grad_accum  # one final sync for the logged score
             last_val = _val_loss(adapter, val_loader)
             if run:
                 run.log({"val/loss": last_val}, step=step)
