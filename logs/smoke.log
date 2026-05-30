@@ -1,56 +1,0 @@
-Using local environment 'terminal_bench_curated'
-Resolved source: terminal_bench_curated (local only)
-Eval job_id: terminal_bench_curated_qwen3:8b_20260529_095801_b4d6b859
-Map:   0%|          | 0/1 [00:00<?, ? examples/s]Map: 100%|██████████| 1/1 [00:00<00:00, 145.96 examples/s]
-Map:   0%|          | 0/1 [00:00<?, ? examples/s]Map: 100%|██████████| 1/1 [00:00<00:00, 1003.90 examples/s]
-Processing 1 groups (1 total rollouts):   0%|          | 0/1 [00:00<?, ?it/s, reward=?]Map:   0%|          | 0/1 [00:00<?, ? examples/s]Map: 100%|██████████| 1/1 [00:00<00:00, 836.85 examples/s]
-Map:   0%|          | 0/1 [00:00<?, ? examples/s]Map: 100%|██████████| 1/1 [00:00<00:00, 1146.92 examples/s]
-Processing 1 groups (1 total rollouts):   0%|          | 0/1 [00:02<?, ?it/s, reward=?]
-Traceback (most recent call last):
-  File "<frozen runpy>", line 198, in _run_module_as_main
-  File "<frozen runpy>", line 88, in _run_code
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/cli/commands/eval.py", line 21, in <module>
-    main()
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/scripts/eval.py", line 844, in main
-    asyncio.run(
-  File "/Users/charleneleong/.local/share/uv/python/cpython-3.12.11-macos-aarch64-none/lib/python3.12/asyncio/runners.py", line 195, in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-  File "/Users/charleneleong/.local/share/uv/python/cpython-3.12.11-macos-aarch64-none/lib/python3.12/asyncio/runners.py", line 118, in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/charleneleong/.local/share/uv/python/cpython-3.12.11-macos-aarch64-none/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/utils/eval_utils.py", line 978, in run_evaluations_tui
-    await run_evaluations(config)
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/utils/eval_utils.py", line 932, in run_evaluations
-    all_results = await asyncio.gather(
-                  ^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/utils/eval_utils.py", line 894, in run_evaluation
-    outputs = await vf_env.evaluate(
-              ^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/envs/environment.py", line 1204, in evaluate
-    return await self.generate(
-           ^^^^^^^^^^^^^^^^^^^^
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/envs/environment.py", line 1075, in generate
-    result = await coro
-             ^^^^^^^^^^
-  File "/Users/charleneleong/.local/share/uv/python/cpython-3.12.11-macos-aarch64-none/lib/python3.12/asyncio/tasks.py", line 631, in _wait_for_one
-    return f.result()  # May raise f.exception().
-           ^^^^^^^^^^
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/utils/async_utils.py", line 28, in with_sem
-    return await coro
-           ^^^^^^^^^^
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/envs/environment.py", line 809, in run_group
-    return await env_client.run_group(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/serve/client/env_client.py", line 85, in run_group
-    response = await self.handle_run_group_request(request, timeout=None)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/serve/client/zmq_env_client.py", line 91, in handle_run_group_request
-    return await self.send_request(request, RunGroupResponse, timeout=timeout)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/charleneleong/Dropbox/Mac/Documents/gen-ai/laguna-finetune/.venv/lib/python3.12/site-packages/verifiers/serve/client/zmq_env_client.py", line 349, in send_request
-    raise RuntimeError(response.error)
-RuntimeError: ValueError("rollout requires info['task_id']")
