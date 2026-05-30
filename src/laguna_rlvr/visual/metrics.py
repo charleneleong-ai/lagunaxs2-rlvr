@@ -26,12 +26,30 @@ def wer(pred: str, ref: str) -> float:
     return _error_rate(pred, ref, jiwer.wer)
 
 
-def generation_metrics(adapter, items: list, prefix: str = "val") -> dict[str, float]:
-    """Transcribe each image and score mean WER/CER (+ code-validity) vs its label — generation
-    quality, not loss.
+def score_predictions(preds: list[str], refs: list[str], kinds: list[str | None],
+                      prefix: str = "val") -> dict[str, float]:
+    """Score predictions vs refs by corpus kind (adapter-free) — the metric core shared by
+    `generation_metrics` (adapter eval) and the Stage-0 baselines.
 
-    `items` are (image, label, ...) tuples; `adapter` exposes `transcribe(list[image]) -> list[str]`.
-    Generation-based (slow) — call on a small subset. `prefix` namespaces the keys (e.g. val / eval).
+    WER/CER apply only to OCR-style text targets (kind None): on long HTML/code, exact-match explodes
+    (WER >> 1), so code corpora ride on code_valid (parse/compile) + CodeBLEU (python). Keys are
+    `{prefix}/metrics/*`; each metric is omitted when no item targets it.
+    """
+    out: dict[str, float] = {}
+    if ocr := [(p, r) for p, r, k in zip(preds, refs, kinds) if k is None]:
+        out[f"{prefix}/metrics/wer"] = sum(wer(p, r) for p, r in ocr) / len(ocr)
+        out[f"{prefix}/metrics/cer"] = sum(cer(p, r) for p, r in ocr) / len(ocr)
+    if (rate := code_validity_rate(preds, kinds)) is not None:
+        out[f"{prefix}/metrics/code_valid"] = rate
+    if (cb := codebleu_score(preds, refs, kinds)) is not None:
+        out[f"{prefix}/metrics/codebleu"] = cb
+    return out
+
+
+def generation_metrics(adapter, items: list, prefix: str = "val") -> dict[str, float]:
+    """Transcribe each image and score generation quality vs its label (not loss). `items` are
+    (image, label, [corpus]) tuples; `adapter` exposes `transcribe(list[image]) -> list[str]`. Slow
+    (generation) — call on a small subset. Keys are namespaced `{prefix}/metrics/*`.
     """
     if not items:
         return {}
@@ -41,15 +59,4 @@ def generation_metrics(adapter, items: list, prefix: str = "val") -> dict[str, f
     preds = [adapter.transcribe([it[0]], max_new_tokens=_OCR_GEN_TOKENS if k is None else _CODE_GEN_TOKENS)[0]
              for it, k in zip(items, kinds)]
     refs = [it[1] for it in items]
-    out: dict[str, float] = {}
-    # WER/CER are transcription metrics — meaningful only for OCR-style text targets (kind None).
-    # On long code/HTML, exact-match explodes (WER >> 1), so code corpora ride on code_valid + codebleu.
-    if ocr := [(p, r) for p, r, k in zip(preds, refs, kinds) if k is None]:
-        out[f"{prefix}/metrics/wer"] = sum(wer(p, r) for p, r in ocr) / len(ocr)
-        out[f"{prefix}/metrics/cer"] = sum(cer(p, r) for p, r in ocr) / len(ocr)
-    # code-validity (no-exec) + CodeBLEU (structural) over code-kind targets; skipped when none.
-    if (rate := code_validity_rate(preds, kinds)) is not None:
-        out[f"{prefix}/metrics/code_valid"] = rate
-    if (cb := codebleu_score(preds, refs, kinds)) is not None:
-        out[f"{prefix}/metrics/codebleu"] = cb
-    return out
+    return score_predictions(preds, refs, kinds, prefix)

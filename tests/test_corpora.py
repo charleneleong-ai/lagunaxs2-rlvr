@@ -60,3 +60,24 @@ def test_ocr_probe_falls_back_to_synthetic(monkeypatch):  # detached run must su
     assert len(probe) == 16  # SyntheticOCR floor, not the remote set
     _img, text = probe[0]
     assert text  # (image, text) transcription pairs
+
+
+@pytest.mark.parametrize("label,kind,expected", [
+    ('ax.set_title("Quarterly Revenue")', "python", "Quarterly Revenue"),
+    ('plt.title( "Sales" )', "python", "Sales"),
+    ("<title>Pricing</title>", "html", "Pricing"),
+    ("<body><h1>Welcome <span>back</span></h1></body>", "html", "Welcome back"),  # nested tags stripped
+])
+def test_extract_needle_pulls_title(label, kind, expected):
+    from laguna_rlvr.visual.corpora import extract_needle
+    assert extract_needle(label, kind) == expected
+
+
+@pytest.mark.parametrize("label,kind", [
+    ("plt.plot([1, 2, 3])", "python"),  # no title call
+    ("<p>no title</p>", "html"),         # no title/h1
+    ("anything", None),                  # non-code corpus
+])
+def test_extract_needle_none_when_absent(label, kind):
+    from laguna_rlvr.visual.corpora import extract_needle
+    assert extract_needle(label, kind) is None

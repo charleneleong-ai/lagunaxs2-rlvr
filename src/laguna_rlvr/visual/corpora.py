@@ -7,6 +7,7 @@ agentic verifier) are intentionally not training corpora — see docs/a100-multi
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from torch.utils.data import Dataset
@@ -106,6 +107,25 @@ CHOICES = [*REGISTRY, "mix"]
 
 # Code "kind" of each corpus's targets, for code-validity metrics; corpora absent here aren't scored.
 CORPUS_KIND = {"websight": "html", "webcode2m": "html", "design2code": "html", "chartmimic": "python"}
+
+_TITLE_PY = re.compile(r"""(?:set_title|suptitle|plt\.title)\(\s*['"]([^'"]+)['"]""")
+_TITLE_HTML = re.compile(r"<title>(.*?)</title>", re.I | re.S)
+_H1_HTML = re.compile(r"<h1[^>]*>(.*?)</h1>", re.I | re.S)
+
+
+def extract_needle(label: str, kind: str | None) -> str | None:
+    """The QA 'needle' for a corpus label: the chart/page title a model should read + later recall.
+    Returns None when absent, so that row is skipped rather than scored against an empty answer.
+    """
+    if kind == "python":
+        m = _TITLE_PY.search(label)
+        return m.group(1).strip() if m else None
+    if kind == "html":
+        for pat in (_TITLE_HTML, _H1_HTML):
+            if m := pat.search(label):
+                if text := re.sub(r"<[^>]+>", "", m.group(1)).strip():  # drop tags nested in <h1>
+                    return text
+    return None
 
 
 def parse_mixture(spec: str) -> list[tuple[str, float]]:
