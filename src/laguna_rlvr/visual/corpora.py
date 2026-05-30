@@ -147,6 +147,29 @@ def read_question(kind: str | None) -> str:
     return _READ_Q.get(kind, _READ_Q_DEFAULT)
 
 
+class QASFTDataset(Dataset):
+    """QA-SFT triples from a base mixture's needle-bearing rows: (image, needle, corpus). The needle
+    (chart/page title via `extract_needle`) is the answer to that kind's question, and is NOT in the
+    question — so training on it forces the projector to convey vision (vs reconstruction's text-LM
+    shortcut). Rows without a clean needle (synthetic / swebench prose) are dropped. Wrap `build_corpus
+    ("mix", n)` (its rows carry the corpus tag needed to pick the kind/question).
+    """
+
+    def __init__(self, base: Dataset):
+        self._items: list[tuple] = []
+        for i in range(len(base)):
+            row = base[i]
+            corpus = row[2] if len(row) > 2 else None
+            if needle := extract_needle(row[1], CORPUS_KIND.get(corpus)):
+                self._items.append((row[0], needle, corpus))
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, i: int):
+        return self._items[i]
+
+
 def parse_mixture(spec: str) -> list[tuple[str, float]]:
     """Parse a mixture string 'websight=0.6,webcode2m=0.4' into [(name, weight), ...]."""
     pairs = []

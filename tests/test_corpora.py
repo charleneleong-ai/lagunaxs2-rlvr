@@ -81,3 +81,20 @@ def test_extract_needle_pulls_title(label, kind, expected):
 def test_extract_needle_none_when_absent(label, kind):
     from laguna_rlvr.visual.corpora import extract_needle
     assert extract_needle(label, kind) is None
+
+
+def test_qasft_dataset_extracts_needle_triples():
+    from laguna_rlvr.visual.corpora import QASFTDataset
+
+    class _Base:  # (image, label, corpus) rows like the mixture
+        rows = [("imgA", 'ax.set_title("Sales")', "chartmimic"),    # python -> needle "Sales"
+                ("imgB", "<title>Home</title>", "design2code"),      # html -> needle "Home"
+                ("imgC", "plt.plot([1,2])", "chartmimic"),           # no title -> dropped
+                ("imgD", "prose", "swebench_mm")]                    # kind None -> dropped
+        def __len__(self): return len(self.rows)
+        def __getitem__(self, i): return self.rows[i]
+
+    ds = QASFTDataset(_Base())
+    assert len(ds) == 2  # only needle-bearing rows
+    assert ds[0] == ("imgA", "Sales", "chartmimic")
+    assert ds[1] == ("imgB", "Home", "design2code")

@@ -57,8 +57,16 @@ def _ocr_probe(seed: int, n: int = 32) -> list:
         return list(SyntheticOCR(n=16, seed=seed))
 
 
+def _loss(adapter: VisualAdapter, images, labels, corpora, objective: str):
+    """Dispatch the training loss by objective: reconstruction (transcribe) vs QA-SFT (answer the
+    per-kind question — forces vision use, since the needle answer isn't in the question)."""
+    if objective == "qa":
+        return adapter.forward_qa(images, labels, corpora).loss
+    return adapter(images, labels).loss
+
+
 @torch.no_grad()
-def _val_loss(adapter: VisualAdapter, loader: DataLoader) -> tuple[float, dict[str, float]]:
+def _val_loss(adapter: VisualAdapter, loader: DataLoader, objective: str = "recon") -> tuple[float, dict[str, float]]:
     """Mean per-example val loss, plus a per-corpus breakdown (so swe-vs-websight ranges are visible)."""
     adapter.llm.gradient_checkpointing_disable()  # no backward in eval -> checkpointing is pure overhead
     try:
@@ -66,7 +74,7 @@ def _val_loss(adapter: VisualAdapter, loader: DataLoader) -> tuple[float, dict[s
         per_sum: dict[str, float] = {}
         per_n: dict[str, int] = {}
         for images, labels, corpora in loader:
-            li = adapter(images, labels).loss.item() * len(labels)
+            li = _loss(adapter, images, labels, corpora, objective).item() * len(labels)
             total += li
             n += len(labels)
             c = corpora[0]
@@ -118,7 +126,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           seed: int = DEFAULT_SEED, dataset: str = "synthetic", use_wandb: bool = True,
           resume: bool = True, mixture: str = "", name_suffix: str = "",
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
-          qa_eval: bool = True, description: str = "", init_projector: str = "") -> Path:
+          qa_eval: bool = True, description: str = "", init_projector: str = "",
+          objective: str = "recon") -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -142,6 +151,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     mix_specs = parse_mixture(mixture) if mixture else [
         (k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
     full = build_corpus(dataset, n_train, mixture=mix_specs)
+    if objective == "qa":  # QA-SFT: (image, needle, corpus) triples from needle-bearing rows
+        from laguna_rlvr.visual.corpora import QASFTDataset
+        full = QASFTDataset(full)
     n_val = min(max(1, len(full) // 10), 256)  # 90/10 split, capped so frequent val stays cheap
     train_ds, val_ds = torch.utils.data.random_split(
         full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
@@ -218,7 +230,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             cwin: dict = {}  # per-corpus (loss-sum, count) over the batch, for per-corpus train logging
             while step < max_steps and not stop:
                 for images, labels, corpora in loader:
-                    loss = adapter(images, labels).loss / grad_accum
+                    loss = _loss(adapter, images, labels, corpora, objective) / grad_accum
                     loss.backward()
                     window = loss.detach() if window is None else window + loss.detach()
                     c = corpora[0]  # micro_batch=1 → one corpus per step
@@ -240,7 +252,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             print(f"step {step}/{max_steps} loss {last_loss:.4f}", flush=True)
                         window, cwin = None, {}
                     if step % val_every == 0:
-                        last_val, val_by_corpus = _val_loss(adapter, val_loader)
+                        last_val, val_by_corpus = _val_loss(adapter, val_loader, objective)
                         # best-checkpoint + early stop on the in-mix val (this run's convergence signal)
                         if last_val < best_val - min_delta:
                             best_val, since_improve = last_val, 0
@@ -250,7 +262,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                         metrics = {"val/loss/total": last_val, "val/loss/best": best_val}
                         metrics.update({f"val/loss/{cc}": v for cc, v in val_by_corpus.items()})
                         if eval_loader is not None:  # trend the fixed external eval alongside val
-                            eval_loss, _ = _val_loss(adapter, eval_loader)
+                            eval_loss, _ = _val_loss(adapter, eval_loader, objective)
                             metrics["eval/loss/total"] = eval_loss
                         if step % gen_every == 0:  # WER/CER (generation) on a coarser cadence
                             torch.cuda.empty_cache()  # reclaim training fragmentation before generation (OOM margin)
@@ -280,7 +292,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                 adapter.projector.load_state_dict(torch.load(best_ckpt, map_location=adapter.llm.device))
             last_val = best_val
             if eval_loader is not None:  # final ranker value, recomputed on the best checkpoint
-                eval_loss, _ = _val_loss(adapter, eval_loader)
+                eval_loss, _ = _val_loss(adapter, eval_loader, objective)
                 drift = adapter.embedding_norm_ratio(wer_images)
                 ocr = generation_metrics(adapter, ocr_probe, "eval/ocr")  # base-OCR retention on held-out probe
                 print(f"  eval/{eval_dataset} loss {eval_loss:.4f}  embed_norm_ratio {drift:.3f}"
@@ -349,9 +361,11 @@ def main(
     qa_eval: bool = typer.Option(True, "--qa-eval/--no-qa-eval", help="multi-turn multimodal QA probe (slow)"),
     description: str = typer.Option("", help="this run's hypothesis/intent — leads the W&B run notes"),
     init_projector: str = typer.Option("", help="warm-start the projector from a prior best.pt (fresh optimizer)"),
+    objective: str = typer.Option("recon", help="recon (transcribe) | qa (QA-SFT — forces vision use)"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
-          resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector)
+          resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
+          objective)
 
 
 if __name__ == "__main__":
