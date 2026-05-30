@@ -257,6 +257,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             metrics.update(generation_metrics(adapter, ocr_probe, "val/ocr"))  # base-OCR retention
                             # base-preservation gauge — projected tokens in-distribution vs base embeds
                             metrics["val/metrics/embed_norm_ratio"] = adapter.embedding_norm_ratio(wer_images)
+                            if qa_eval:  # track multimodal QA emergence during training (coarse — generation is slow)
+                                from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
+                                metrics.update(evaluate_multiturn_qa(adapter, n=8, source="mixture"))
                         wer_str = (f"  wer {metrics['val/metrics/wer']:.3f} cer {metrics['val/metrics/cer']:.3f}"
                                    if "val/metrics/wer" in metrics else "")
                         print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience}){wer_str}", flush=True)
