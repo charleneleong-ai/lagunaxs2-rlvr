@@ -33,30 +33,39 @@ _DEFAULT_CONFIG = "configs/mm_adapter/a100-80gb-laguna-bf16.toml"
 
 
 def _collate(batch):
-    images, labels = zip(*batch)
-    return list(images), list(labels)
+    cols = list(zip(*batch))
+    images, labels = list(cols[0]), list(cols[1])
+    corpora = list(cols[2]) if len(cols) > 2 else [None] * len(images)  # corpus tag (mix) or None
+    return images, labels, corpora
 
 
 @torch.no_grad()
-def _val_loss(adapter: VisualAdapter, loader: DataLoader) -> float:
-    """Mean per-example loss over the val set — measures generalization, not memorization."""
+def _val_loss(adapter: VisualAdapter, loader: DataLoader) -> tuple[float, dict[str, float]]:
+    """Mean per-example val loss, plus a per-corpus breakdown (so swe-vs-websight ranges are visible)."""
     adapter.llm.gradient_checkpointing_disable()  # no backward in eval -> checkpointing is pure overhead
     try:
         total, n = 0.0, 0
-        for images, labels in loader:
-            total += adapter(images, labels).loss.item() * len(labels)
+        per_sum: dict[str, float] = {}
+        per_n: dict[str, int] = {}
+        for images, labels, corpora in loader:
+            li = adapter(images, labels).loss.item() * len(labels)
+            total += li
             n += len(labels)
+            c = corpora[0]
+            if c is not None:
+                per_sum[c] = per_sum.get(c, 0.0) + li
+                per_n[c] = per_n.get(c, 0) + len(labels)
     finally:
         adapter.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    return total / max(n, 1)
+    return total / max(n, 1), {c: per_sum[c] / per_n[c] for c in per_sum}
 
 
 def _log_samples(run, ds: Dataset, key: str, n: int = 8) -> None:
     """Log a few (image, text) pairs as a W&B table so the corpus is inspectable in the dashboard."""
     table = wandb.Table(columns=["image", "text"])
     for i in range(min(n, len(ds))):
-        img, txt = ds[i]
-        table.add_data(wandb.Image(img), txt)
+        item = ds[i]
+        table.add_data(wandb.Image(item[0]), item[1])  # item may be (img, txt) or (img, txt, corpus)
     run.log({key: table}, step=0)
 
 
@@ -147,24 +156,32 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         with monitor:
             opt.zero_grad()
             window = None  # GPU-side running sum of micro-losses → mean over the effective batch
+            cwin: dict = {}  # per-corpus (loss-sum, count) over the batch, for per-corpus train logging
             while step < max_steps and not stop:
-                for images, labels in loader:
+                for images, labels, corpora in loader:
                     loss = adapter(images, labels).loss / grad_accum
                     loss.backward()
                     window = loss.detach() if window is None else window + loss.detach()
+                    c = corpora[0]  # micro_batch=1 → one corpus per step
+                    if c is not None:
+                        s, k = cwin.get(c, (None, 0))
+                        cwin[c] = (loss.detach() if s is None else s + loss.detach(), k + 1)
                     if (step + 1) % grad_accum == 0:
                         opt.step()
                         opt.zero_grad()
                         # log the effective-batch mean loss per optimizer step — smoother than a
                         # single micro-example, and one CUDA sync per step rather than every micro-step.
                         last_loss = window.item()
-                        window = None
                         if run:
-                            run.log({"train/loss": last_loss}, step=step)
+                            log = {"train/loss": last_loss}
+                            for cc, (s, k) in cwin.items():
+                                log[f"train/loss/{cc}"] = (s * grad_accum / k).item()
+                            run.log(log, step=step)
                         if (step + 1) % (20 * grad_accum) == 0:
                             print(f"step {step}/{max_steps} loss {last_loss:.4f}", flush=True)
+                        window, cwin = None, {}
                     if step % val_every == 0:
-                        last_val = _val_loss(adapter, val_loader)
+                        last_val, val_by_corpus = _val_loss(adapter, val_loader)
                         # best-checkpoint + early stop on the in-mix val (this run's convergence signal)
                         if last_val < best_val - min_delta:
                             best_val, since_improve = last_val, 0
@@ -173,7 +190,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             since_improve += 1
                         print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience})", flush=True)
                         if run:
-                            run.log({"val/loss": last_val, "val/best": best_val}, step=step)
+                            run.log({"val/loss": last_val, "val/best": best_val,
+                                     **{f"val/loss/{cc}": v for cc, v in val_by_corpus.items()}}, step=step)
                         if since_improve >= patience:
                             print(f"early stop: no val improvement in {patience} evals", flush=True)
                             stop = True
@@ -190,7 +208,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             if eval_dataset:  # fixed external held-out ranker (same set for every mixture variant)
                 eval_loader = DataLoader(build_corpus(eval_dataset, 128),
                                          batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
-                eval_loss = _val_loss(adapter, eval_loader)
+                eval_loss, _ = _val_loss(adapter, eval_loader)
                 print(f"  eval/{eval_dataset} loss {eval_loss:.4f}", flush=True)
                 if run:
                     run.log({"eval/loss": eval_loss}, step=step)

@@ -25,5 +25,5 @@ def test_mixture_blends_corpora_by_weight():  # offline — synthetic only
 
     mix = _Mixture([("synthetic", 0.75), ("synthetic", 0.25)], n=8)
     assert len(mix) == 8  # round(8*.75)=6 + round(8*.25)=2
-    img, txt = mix[0]
-    assert txt  # yields (image, text) like any corpus
+    img, txt, corpus = mix[0]
+    assert txt and corpus == "synthetic"  # yields (image, text, corpus-tag)

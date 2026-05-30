@@ -65,11 +65,13 @@ class _Mixture(Dataset):
     def __init__(self, specs: list[tuple[str, float]], n: int):
         total = sum(w for _, w in specs)
         self._datasets: list[Dataset] = []
+        self._names: list[str] = []
         self._index: list[tuple[int, int]] = []
         for di, (name, weight) in enumerate(specs):
             quota = max(1, round(n * weight / total))
             ds = build_corpus(name, quota)
             self._datasets.append(ds)
+            self._names.append(name)
             # cap to the quota so a fixed-size corpus (swebench_mm always returns 612) can't blow its
             # weight — the realized mix then matches the requested weights.
             self._index += [(di, j) for j in range(min(quota, len(ds)))]
@@ -79,7 +81,8 @@ class _Mixture(Dataset):
 
     def __getitem__(self, i: int):
         di, j = self._index[i]
-        return self._datasets[di][j]
+        img, txt = self._datasets[di][j]
+        return img, txt, self._names[di]  # 3rd element tags the corpus for per-corpus loss logging
 
 
 # Default full-training mixture (WebSight-heavy; mirrors the corpus plan in the design doc). A
