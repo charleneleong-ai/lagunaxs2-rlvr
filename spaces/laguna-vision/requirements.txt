@@ -1,0 +1,12 @@
+# The Space installs the laguna_rlvr package from the repo root (vision adapter: VisualAdapter, encoders).
+# Pin transformers/torch to the training env; compressed-tensors is needed for the NVFP4 base, tiktoken/
+# sentencepiece for the GLM-OCR tokenizer.
+laguna-rlvr @ git+https://github.com/charleneleong-ai/lagunaxs2-rlvr.git@feat/hf-space-vision
+torch
+transformers
+compressed-tensors
+tiktoken
+sentencepiece
+huggingface_hub
+pillow
+gradio>=5
