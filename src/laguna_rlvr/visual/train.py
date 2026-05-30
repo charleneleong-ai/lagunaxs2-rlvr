@@ -14,10 +14,11 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from laguna_rlvr.mm.model import ModalityAdapter
+from laguna_rlvr.mm.seed import seed_everything
 from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_a100_40gb
 from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.encoders import load_encoder
-from laguna_rlvr.visual.model import VisualAdapter
 
 _DEFAULT_CONFIG = "configs/mm_adapter/a100-40gb-projector.toml"
 
@@ -29,7 +30,8 @@ def _collate(batch):
 
 def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | None = None,
           steps: int | None = None, n_train: int = 512, pool: int = 4,
-          projector_kind: str = "linear", out: str = "results/visual") -> Path:
+          projector_kind: str = "linear", out: str = "results/visual", seed: int = 0) -> Path:
+    seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
     print(render_plan(plan), flush=True)
@@ -45,7 +47,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         raise SystemExit("Guardrail failures for the configured backbone:\n- " + "\n- ".join(issues))
 
     enc = load_encoder(encoder, pool=pool)
-    adapter = VisualAdapter(enc, base, projector_kind=projector_kind)
+    adapter = ModalityAdapter(enc, base, projector_kind=projector_kind)
     opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
     loader = DataLoader(SyntheticOCR(n=n_train), batch_size=plan.micro_batch_size,
                         shuffle=True, collate_fn=_collate)
@@ -54,7 +56,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     opt.zero_grad()
     while step < max_steps:
         for images, labels in loader:
-            loss = adapter(images, labels).loss / grad_accum
+            loss = adapter(images, labels) / grad_accum
             loss.backward()
             if (step + 1) % grad_accum == 0:
                 opt.step()
@@ -83,8 +85,9 @@ def main() -> None:
     p.add_argument("--pool", type=int, default=4)
     p.add_argument("--projector", default="linear", choices=["linear", "mlp"])
     p.add_argument("--out", default="results/visual")
+    p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
-    train(a.config, a.encoder, a.base, a.steps, a.n_train, a.pool, a.projector, a.out)
+    train(a.config, a.encoder, a.base, a.steps, a.n_train, a.pool, a.projector, a.out, a.seed)
 
 
 if __name__ == "__main__":

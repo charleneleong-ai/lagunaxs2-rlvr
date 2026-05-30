@@ -15,13 +15,13 @@ from transformers import AutoImageProcessor, AutoModelForImageTextToText
 
 from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.encoders import load_encoder
-from laguna_rlvr.visual.metrics import cer
-from laguna_rlvr.visual.model import VisualAdapter
+from laguna_rlvr.mm.metrics import cer
+from laguna_rlvr.mm.model import ModalityAdapter
 
 _DEFAULT_CONFIG = "configs/mm_adapter/a100-40gb-projector.toml"
 
 
-def _adapter_cer(adapter: VisualAdapter, ds: SyntheticOCR) -> float:
+def _adapter_cer(adapter: ModalityAdapter, ds: SyntheticOCR) -> float:
     scores = [cer(adapter.transcribe([img])[0], label) for img, label in ds]
     return sum(scores) / len(scores)
 
@@ -44,7 +44,7 @@ def evaluate(encoder: str, base: str, ckpt: str, n_eval: int, pool: int,
              projector_kind: str, baseline: bool) -> dict:
     ds = SyntheticOCR(n=n_eval, seed=10_000)  # held out from the training seed (0)
     enc = load_encoder(encoder, pool=pool)
-    adapter = VisualAdapter(enc, base, projector_kind=projector_kind)
+    adapter = ModalityAdapter(enc, base, projector_kind=projector_kind)
     adapter.projector.load_state_dict(torch.load(ckpt, map_location=adapter.llm.device))
     result = {"encoder": encoder, "base": Path(base).name, "adapter_cer": _adapter_cer(adapter, ds)}
     if baseline:

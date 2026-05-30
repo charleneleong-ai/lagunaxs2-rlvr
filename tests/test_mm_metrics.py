@@ -1,4 +1,4 @@
-from laguna_rlvr.visual.metrics import cer
+from laguna_rlvr.mm.metrics import cer
 
 
 def test_cer_zero_on_exact_match():
