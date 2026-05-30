@@ -87,6 +87,23 @@ def _log_samples(run, ds: Dataset, key: str, n: int = 8) -> None:
     run.log({key: table}, step=0)
 
 
+def _log_qa_samples(run, n: int = 4) -> None:
+    """Log example multi-turn multimodal QA episodes (the target task: read A, read B, recall A) as a
+    W&B table, so the qa/metrics/* probe is inspectable next to its scores."""
+    from laguna_rlvr.visual.corpora import read_question
+    from laguna_rlvr.visual.multiturn_qa import _RECALL_Q, image_fetcher, mixture_episodes
+    eps = mixture_episodes(n, per_corpus=16)
+    if not eps:
+        return
+    fetch = image_fetcher(eps)
+    table = wandb.Table(columns=["image_A", "Q1 read A", "needle_A",
+                                 "image_B", "Q2 read B", "needle_B", "Q3 recall", "expected"])
+    for ep in eps:
+        table.add_data(wandb.Image(fetch(ep.a)), read_question(ep.a.kind), ep.a.needle,
+                       wandb.Image(fetch(ep.b)), read_question(ep.b.kind), ep.b.needle, _RECALL_Q, ep.a.needle)
+    run.log({"qa/samples": table}, step=0)
+
+
 def _save_resume(path: Path, adapter: VisualAdapter, opt, step: int, run) -> None:
     """Atomically write resume state (projector + optimizer + step + W&B id) for crash recovery."""
     tmp = path.with_suffix(".tmp")
@@ -182,6 +199,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         if start_step == 0:  # sample tables log at step 0 — skip when rejoining a resumed run
             _log_samples(run, train_ds, "train/samples")
             _log_samples(run, val_ds, "val/samples")
+            if qa_eval:
+                _log_qa_samples(run)  # example QA episodes (the target task) next to qa/metrics/*
 
     # GPUMonitor samples nvidia-smi in the background; always log a results.jsonl row (even on
     # crash/SIGINT) so the sweep tracker sees CRASH instead of a silently-vanished iter.
