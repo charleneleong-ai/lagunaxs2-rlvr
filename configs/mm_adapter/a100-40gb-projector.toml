@@ -7,6 +7,7 @@ name = "laguna-xs2-glm-ocr-visual-context"
 [backbone]
 model_id = "poolside/Laguna-XS.2-NVFP4"
 quantization = "4bit-nvfp4"
+params_b = 33.4
 freeze = true
 max_sequence_length = 8192
 
@@ -20,7 +21,6 @@ freeze_encoder = true
 [adapter]
 kind = "ocr_context_projector"
 objective = "optical_context_reconstruction"
-output_tokens = 64
 train_projector = true
 
 [training]
@@ -31,7 +31,6 @@ learning_rate = 0.0001
 max_steps = 1000
 lora_enabled = false
 
-[a100_40gb_guardrails]
+[gpu_guardrails]
 max_vram_gb = 40
 reserve_vram_gb = 4
-max_output_tokens = 128

@@ -1,4 +1,4 @@
-"""Dry-run an A100-40GB generalized adapter config."""
+"""Dry-run a generalized adapter config against its VRAM budget."""
 from __future__ import annotations
 
 import argparse
@@ -6,7 +6,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_a100_40gb
+from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,7 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     with args.config.open("rb") as fh:
         plan = plan_from_config(tomllib.load(fh))
     print(render_plan(plan))
-    return 1 if validate_a100_40gb(plan) else 0
+    return 1 if validate_gpu_budget(plan) else 0
 
 
 if __name__ == "__main__":

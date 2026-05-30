@@ -23,13 +23,13 @@ from autoresearch.gpu_monitor import GPUMonitor
 from autoresearch.results import log_experiment
 from torch.utils.data import DataLoader, Dataset
 
-from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_a100_40gb
+from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
 from laguna_rlvr.visual.corpora import REGISTRY, build_corpus
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.model import VisualAdapter
 
-_DEFAULT_CONFIG = "configs/mm_adapter/a100-40gb-projector.toml"
+_DEFAULT_CONFIG = "configs/mm_adapter/a100-80gb-laguna-bf16.toml"
 
 
 def _collate(batch):
@@ -83,8 +83,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     grad_accum = plan.gradient_accumulation_steps
     base = base or plan.backbone_model
 
-    # Enforce the A100-40GB guardrails only for the configured backbone; a small debug --base is exempt.
-    issues = validate_a100_40gb(plan)
+    # Enforce the VRAM-budget guardrails only for the configured backbone; a small debug --base is exempt.
+    issues = validate_gpu_budget(plan)
     if base == plan.backbone_model and issues:
         raise SystemExit("Guardrail failures for the configured backbone:\n- " + "\n- ".join(issues))
 

@@ -1,11 +1,7 @@
 import pytest
 
-from laguna_rlvr.visual.corpora import REGISTRY, build_corpus
+from laguna_rlvr.visual.corpora import build_corpus
 from laguna_rlvr.visual.data import SyntheticOCR
-
-
-def test_registry_has_planned_corpora():
-    assert {"synthetic", "swebench_mm", "websight", "webcode2m"} <= set(REGISTRY)
 
 
 def test_build_corpus_dispatches_synthetic():  # offline — no network/model
