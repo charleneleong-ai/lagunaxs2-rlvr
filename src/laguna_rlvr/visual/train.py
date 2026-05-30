@@ -27,7 +27,7 @@ from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_b
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
 from laguna_rlvr.visual.corpora import CHOICES, build_corpus, parse_mixture
 from laguna_rlvr.visual.encoders import load_encoder
-from laguna_rlvr.visual.metrics import cer, wer
+from laguna_rlvr.visual.metrics import transcription_metrics
 from laguna_rlvr.visual.model import VisualAdapter
 
 _DEFAULT_CONFIG = "configs/mm_adapter/a100-80gb-laguna-bf16.toml"
@@ -59,18 +59,6 @@ def _val_loss(adapter: VisualAdapter, loader: DataLoader) -> tuple[float, dict[s
     finally:
         adapter.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     return total / max(n, 1), {c: per_sum[c] / per_n[c] for c in per_sum}
-
-
-@torch.no_grad()
-def _transcription_metrics(adapter: VisualAdapter, items: list) -> dict[str, float]:
-    """Generation-based quality alongside the loss: transcribe each image and score WER/CER vs the
-    label. On a small subset (generation is slow); items are (image, label[, corpus]) tuples."""
-    if not items:
-        return {}
-    preds = adapter.transcribe([it[0] for it in items])
-    refs = [it[1] for it in items]
-    return {"val/wer": sum(wer(p, r) for p, r in zip(preds, refs)) / len(items),
-            "val/cer": sum(cer(p, r) for p, r in zip(preds, refs)) / len(items)}
 
 
 def _log_samples(run, ds: Dataset, key: str, n: int = 8) -> None:
@@ -127,7 +115,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     val_loader = DataLoader(val_ds, batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
     eval_loader = (DataLoader(build_corpus(eval_dataset, 128), batch_size=plan.micro_batch_size,
                               shuffle=False, collate_fn=_collate) if eval_dataset else None)  # fixed ext. eval
-    val_every = max(50, min(max_steps // 10, 500))  # eval/early-stop cadence (bounded for high ceilings)
+    val_every = max(50, min(max_steps // 10, 500))  # loss/early-stop cadence (bounded for high ceilings)
+    gen_every = val_every * 3  # generation metrics (WER/CER) are slow -> coarser cadence than loss val
     wer_items = [val_ds[i] for i in range(min(16, len(val_ds)))]  # fixed subset for WER/CER (generation)
 
     # Scope the run identity by dataset too — otherwise different corpora on the same backbone share
@@ -206,15 +195,17 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             torch.save(adapter.projector.state_dict(), best_ckpt)
                         else:
                             since_improve += 1
-                        print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience})", flush=True)
+                        metrics = {"val/loss": last_val, "val/best": best_val}
+                        metrics.update({f"val/loss/{cc}": v for cc, v in val_by_corpus.items()})
                         if eval_loader is not None:  # trend the fixed external eval alongside val
                             eval_loss, _ = _val_loss(adapter, eval_loader)
-                        tm = _transcription_metrics(adapter, wer_items)  # WER/CER quality alongside loss
-                        print(f"  wer {tm.get('val/wer', float('nan')):.3f} cer {tm.get('val/cer', float('nan')):.3f}", flush=True)
+                            metrics["eval/loss"] = eval_loss
+                        if step % gen_every == 0:  # WER/CER (generation) on a coarser cadence
+                            metrics.update(transcription_metrics(adapter, wer_items, "val"))
+                        wer_str = f"  wer {metrics['val/wer']:.3f} cer {metrics['val/cer']:.3f}" if "val/wer" in metrics else ""
+                        print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience}){wer_str}", flush=True)
                         if run:
-                            run.log({"val/loss": last_val, "val/best": best_val, **tm,
-                                     **({"eval/loss": eval_loss} if eval_loader is not None else {}),
-                                     **{f"val/loss/{cc}": v for cc, v in val_by_corpus.items()}}, step=step)
+                            run.log(metrics, step=step)
                         if since_improve >= patience:
                             print(f"early stop: no val improvement in {patience} evals", flush=True)
                             stop = True
