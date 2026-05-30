@@ -101,7 +101,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           seed: int = DEFAULT_SEED, dataset: str = "synthetic", use_wandb: bool = True,
           resume: bool = True, mixture: str = "", name_suffix: str = "",
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
-          qa_eval: bool = False) -> Path:
+          qa_eval: bool = False, description: str = "") -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -160,7 +160,18 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     if use_wandb:
         if not os.environ.get("WANDB_API_KEY"):
             os.environ.setdefault("WANDB_MODE", "offline")
-        run = wandb.init(project="laguna-mm-adapter", name=run_name,
+        # W&B notes: the run's own --description (its hypothesis/intent) leads, then an auto param
+        # summary for reproducibility. Without --description it's the summary alone.
+        summary = (
+            f"Stage-1 projector SFT — {encoder} → {projector_kind} projector → frozen "
+            f"{Path(base).name}. Corpus: {dataset}{f' ({mixture})' if mixture else ''}; "
+            f"lr={lr}, max_steps={max_steps}, effective_batch={grad_accum}. Projector-only "
+            f"(base + encoder frozen); vision spliced at <image>."
+            + (f" Held-out eval: {eval_dataset}." if eval_dataset else "")
+            + (" Multi-turn multimodal QA probe on (qa/metrics/*)." if qa_eval else "")
+        )
+        notes = f"{description}\n\n{summary}" if description else summary
+        run = wandb.init(project="laguna-mm-adapter", name=run_name, notes=notes,
                          id=resume_id, resume="allow" if resume_id else None,
                          config={"base": base, "encoder": encoder, "projector": projector_kind,
                                  "dataset": dataset, "lr": lr, "max_steps": max_steps,
@@ -310,9 +321,10 @@ def main(
     patience: int = typer.Option(3, help="early-stop after this many evals without val improvement"),
     min_delta: float = typer.Option(1e-3, help="min val/loss decrease to count as an improvement"),
     qa_eval: bool = typer.Option(False, "--qa-eval/--no-qa-eval", help="multi-turn multimodal QA probe (slow)"),
+    description: str = typer.Option("", help="this run's hypothesis/intent — leads the W&B run notes"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
-          resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval)
+          resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description)
 
 
 if __name__ == "__main__":
