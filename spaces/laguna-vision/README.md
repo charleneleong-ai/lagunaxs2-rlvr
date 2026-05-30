@@ -16,6 +16,8 @@ A text-only coding model (`poolside/Laguna-XS.2`, 33 B MoE) **handling images in
 conversation** through a trained GLM-OCR → projector → frozen-LLM adapter. Upload a screenshot or chart
 and ask about it; vision is spliced at an `<image>` marker each turn (a tool observation, not a prefix).
 
+![Laguna XS.2 visual-context adapter architecture](architecture.png)
+
 ## Configuration (env / Space variables)
 
 | var | default | meaning |
