@@ -112,6 +112,30 @@ websight`) stay available for ablations.
 - Determinism — `seed_everything()` + `--seed` (default 42).
 - Always-logged `results.jsonl` via `GPUMonitor` (autoresearch).
 
+## Metrics roadmap
+
+**Logged now** (W&B): `train/loss` + `val/loss` (+ per-corpus `…/<corpus>`), `eval/loss` (Design2Code,
+fixed held-out — the cross-mixture ranker), `val/wer` + `val/cer` (transcription quality, coarser
+`gen_every` cadence), `qa/accuracy` + `qa/recall` (multi-turn multimodal probe).
+
+**Planned (goal-faithful generation metrics — most valuable next):**
+- **Render-diff / visual match** — generate code → render (headless browser for HTML, matplotlib exec
+  for charts) → SSIM / pixel-IoU / CLIP-image-sim vs the target screenshot. The actual objective + the
+  RLVR reward. **Needs the code-execution sandbox** (don't exec model-generated code in-process) — Stage-3.
+- **Code validity / executability** — does the generated HTML parse / matplotlib code `compile`+run?
+  (binary pass-rate; the compile/parse half is safe + cheap, full exec is sandbox).
+- **Structural match** — CodeBLEU (AST-aware, needs the `codebleu` dep) / DOM-tree edit distance / the
+  Design2Code block-text-position-color metrics (WER/CER treats code as flat text).
+
+**Planned (multi-turn, when outputs go open-ended / agentic):**
+- **Knowledge-retention curve** — generalize `qa/recall` to retention-vs-turn-distance (info from turn 1
+  used at turn k, multi-hop).
+- **LLM-as-judge** — for non-verifiable outputs ("explain this UI", "describe the chart") where
+  exact-match/WER fail; rubric-scored, the report's Hive (§3.2.2) / IF-judge (§4.3.2) pattern.
+
+All reported relative to the GLM-OCR tool-baseline floor (`eval.py`) + the untrained projector
+("skill above baseline").
+
 ## Non-goals (this stage)
 
 - Training Laguna's weights (backbone stays frozen; QLoRA only if projector-only saturates).
