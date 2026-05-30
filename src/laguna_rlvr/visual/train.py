@@ -11,15 +11,17 @@ random. Use the unquantized base; the load-integrity guard in model.py enforces 
 """
 from __future__ import annotations
 
-import argparse
+import os
 import time
 import tomllib
 from pathlib import Path
 
 import torch
+import typer
+import wandb
 from autoresearch.gpu_monitor import GPUMonitor
 from autoresearch.results import log_experiment
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_a100_40gb
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
@@ -35,10 +37,42 @@ def _collate(batch):
     return list(images), list(labels)
 
 
+def _build_dataset(dataset: str, n_train: int) -> Dataset:
+    if dataset == "swebench_mm":
+        # local import: pulls `datasets` + downloads images, only when this corpus is requested
+        from laguna_rlvr.visual.swebench_mm import SWEBenchMultimodal
+
+        return SWEBenchMultimodal()  # full 612-instance set (dev+test); n_train is the synthetic cap
+    return SyntheticOCR(n=n_train)
+
+
+@torch.no_grad()
+def _val_loss(adapter: VisualAdapter, loader: DataLoader) -> float:
+    """Mean per-example loss over the val set — measures generalization, not memorization."""
+    adapter.llm.gradient_checkpointing_disable()  # no backward in eval -> checkpointing is pure overhead
+    try:
+        total, n = 0.0, 0
+        for images, labels in loader:
+            total += adapter(images, labels).loss.item() * len(labels)
+            n += len(labels)
+    finally:
+        adapter.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    return total / max(n, 1)
+
+
+def _log_samples(run, ds: Dataset, key: str, n: int = 8) -> None:
+    """Log a few (image, text) pairs as a W&B table so the corpus is inspectable in the dashboard."""
+    table = wandb.Table(columns=["image", "text"])
+    for i in range(min(n, len(ds))):
+        img, txt = ds[i]
+        table.add_data(wandb.Image(img), txt)
+    run.log({key: table}, step=0)
+
+
 def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | None = None,
           steps: int | None = None, n_train: int = 512, pool: int = 4,
           projector_kind: str = "linear", out: str = "results/visual",
-          seed: int = DEFAULT_SEED) -> Path:
+          seed: int = DEFAULT_SEED, dataset: str = "synthetic", use_wandb: bool = True) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -57,17 +91,35 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     enc = load_encoder(encoder, pool=pool)
     adapter = VisualAdapter(enc, base, projector_kind=projector_kind)
     opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
-    loader = DataLoader(SyntheticOCR(n=n_train), batch_size=plan.micro_batch_size,
-                        shuffle=True, collate_fn=_collate)
+
+    full = _build_dataset(dataset, n_train)
+    n_val = max(1, len(full) // 10)  # 90/10 split, seeded for reproducibility
+    train_ds, val_ds = torch.utils.data.random_split(
+        full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
+    loader = DataLoader(train_ds, batch_size=plan.micro_batch_size, shuffle=True, collate_fn=_collate)
+    val_loader = DataLoader(val_ds, batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
+    val_every = max(20, max_steps // 10)
 
     out_dir = Path(out) / f"{encoder}__{Path(base).name}"
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt = out_dir / "projector.pt"
 
+    # Offline when no WANDB_API_KEY (still produces a local trace to sync later); online otherwise.
+    run = None
+    if use_wandb:
+        if not os.environ.get("WANDB_API_KEY"):
+            os.environ.setdefault("WANDB_MODE", "offline")
+        run = wandb.init(project="laguna-mm-adapter", name=f"{encoder}__{Path(base).name}",
+                         config={"base": base, "encoder": encoder, "projector": projector_kind,
+                                 "dataset": dataset, "lr": lr, "max_steps": max_steps,
+                                 "grad_accum": grad_accum, "n_train": n_train, "seed": seed})
+        _log_samples(run, train_ds, "train/samples")
+        _log_samples(run, val_ds, "val/samples")
+
     # GPUMonitor samples nvidia-smi in the background; always log a results.jsonl row (even on
     # crash/SIGINT) so the sweep tracker sees CRASH instead of a silently-vanished iter.
     t0 = time.monotonic()
-    step, last_loss, status = 0, float("nan"), "CRASH"
+    step, last_loss, last_val, status = 0, float("nan"), float("nan"), "CRASH"
     monitor = GPUMonitor()
     try:
         with monitor:
@@ -79,24 +131,42 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                     if (step + 1) % grad_accum == 0:
                         opt.step()
                         opt.zero_grad()
-                    if step % 20 == 0:  # .item() forces a CUDA sync — only on the print cadence
-                        print(f"step {step}/{max_steps} loss {loss.item() * grad_accum:.4f}", flush=True)
+                    if step % 20 == 0:  # .item() forces a CUDA sync — only on the log cadence
+                        cur = loss.item() * grad_accum
+                        print(f"step {step}/{max_steps} loss {cur:.4f}", flush=True)
+                        if run:
+                            run.log({"train/loss": cur}, step=step)
+                    if step % val_every == 0:
+                        last_val = _val_loss(adapter, val_loader)
+                        print(f"  val loss {last_val:.4f}", flush=True)
+                        if run:
+                            run.log({"val/loss": last_val}, step=step)
                     step += 1
                     if step >= max_steps:
                         break
             last_loss = loss.item() * grad_accum  # one final sync for the logged score
+            last_val = _val_loss(adapter, val_loader)
+            if run:
+                run.log({"val/loss": last_val}, step=step)
         torch.save(adapter.projector.state_dict(), ckpt)
-        print(f"saved projector -> {ckpt}", flush=True)
+        print(f"saved projector -> {ckpt} (train {last_loss:.4f}, val {last_val:.4f})", flush=True)
         status = "KEEP"
     finally:
         gpu = monitor.summary()
         print(monitor.format_summary(), flush=True)
+        if run:
+            run.summary.update({"final_loss": last_loss, "val_loss": last_val, "status": status,
+                                "gpu_peak_mem_gb": gpu.peak_mem_gb,
+                                "gpu_mean_util_pct": gpu.mean_util_pct})
+            run.finish()
         log_experiment(
             tag="mm_adapter", config_name=f"{encoder}__{Path(base).name}",
             score=last_loss, steps=step, status=status,
-            description=f"visual projector ({projector_kind}) on {base}",
+            description=f"visual projector ({projector_kind}) on {base} [{dataset}]",
+            wandb_url=run.url if run else "",
             runtime_min=(time.monotonic() - t0) / 60,
-            extra={"final_loss": last_loss, "backbone": base, "encoder": encoder,
+            extra={"final_loss": last_loss, "val_loss": last_val, "backbone": base,
+                   "encoder": encoder, "dataset": dataset,
                    "gpu_mean_util_pct": round(gpu.mean_util_pct, 1),
                    "gpu_peak_mem_gb": round(gpu.peak_mem_gb, 1),
                    "gpu_peak_mem_pct": round(gpu.peak_mem_pct, 1)},
@@ -104,20 +174,25 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     return ckpt
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default=_DEFAULT_CONFIG)
-    p.add_argument("--encoder", default="glm_ocr", choices=["glm_ocr", "qwen3_vl"])
-    p.add_argument("--base", default=None, help="override the config backbone (e.g. Qwen/Qwen3-0.6B for debug)")
-    p.add_argument("--steps", type=int, default=None)
-    p.add_argument("--n-train", type=int, default=512)
-    p.add_argument("--pool", type=int, default=4)
-    p.add_argument("--projector", default="linear", choices=["linear", "mlp"])
-    p.add_argument("--out", default="results/visual")
-    p.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    a = p.parse_args()
-    train(a.config, a.encoder, a.base, a.steps, a.n_train, a.pool, a.projector, a.out, a.seed)
+app = typer.Typer(add_completion=False, help=__doc__)
+
+
+@app.command()
+def main(
+    config: str = _DEFAULT_CONFIG,
+    encoder: str = typer.Option("glm_ocr", help="glm_ocr | qwen3_vl"),
+    base: str = typer.Option(None, help="override the config backbone (e.g. Qwen/Qwen3-0.6B for debug)"),
+    steps: int = typer.Option(None, help="override config max_steps"),
+    n_train: int = 512,
+    pool: int = 4,
+    projector: str = typer.Option("linear", help="linear | mlp"),
+    out: str = "results/visual",
+    seed: int = DEFAULT_SEED,
+    dataset: str = typer.Option("synthetic", help="synthetic | swebench_mm"),
+    wandb_tracking: bool = typer.Option(True, "--wandb/--no-wandb", help="log to Weights & Biases"),
+) -> None:
+    train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking)
 
 
 if __name__ == "__main__":
-    main()
+    app()

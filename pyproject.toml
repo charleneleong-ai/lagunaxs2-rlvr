@@ -20,6 +20,8 @@ dependencies = [
     "pillow>=12.2.0",
     "httpx>=0.28.1",
     "autoresearch",
+    "typer>=0.25.1",
+    "rich>=15.0.0",
 ]
 
 [dependency-groups]
