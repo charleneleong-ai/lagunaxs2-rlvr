@@ -7,7 +7,8 @@ from transformers import AutoImageProcessor, AutoModelForImageTextToText
 
 from laguna_rlvr.visual.projector import mean_pool
 
-_REPOS = {"glm_ocr": "zai-org/GLM-OCR", "qwen3_vl": "Qwen/Qwen3-VL-4B-Instruct"}
+_REPOS = {"glm_ocr": "zai-org/GLM-OCR", "qwen3_vl": "Qwen/Qwen3-VL-4B-Instruct",
+          "qwen3_vl_8b": "Qwen/Qwen3-VL-8B-Instruct"}  # stronger general vision tower for the projector
 
 # Both GlmOcrForConditionalGeneration and Qwen3VLForConditionalGeneration nest the
 # frozen vision tower at `.model.visual`. Its forward is `visual(pixel_values, grid_thw=...)`
