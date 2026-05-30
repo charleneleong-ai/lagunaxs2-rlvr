@@ -99,6 +99,9 @@ REGISTRY: dict[str, Callable[[int], Dataset]] = {
 }
 CHOICES = [*REGISTRY, "mix"]
 
+# Code "kind" of each corpus's targets, for code-validity metrics; corpora absent here aren't scored.
+CORPUS_KIND = {"websight": "html", "webcode2m": "html", "design2code": "html", "chartmimic": "python"}
+
 
 def parse_mixture(spec: str) -> list[tuple[str, float]]:
     """Parse a mixture string 'websight=0.6,webcode2m=0.4' into [(name, weight), ...]."""

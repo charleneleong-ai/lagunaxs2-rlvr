@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import jiwer
 
+from laguna_rlvr.visual.code_metrics import code_validity_rate
+from laguna_rlvr.visual.corpora import CORPUS_KIND
+
 
 def _error_rate(pred: str, ref: str, fn) -> float:
     """A jiwer error rate with an empty-ref guard: 0.0 if pred is also empty, else 1.0."""
@@ -20,8 +23,9 @@ def wer(pred: str, ref: str) -> float:
     return _error_rate(pred, ref, jiwer.wer)
 
 
-def transcription_metrics(adapter, items: list, prefix: str = "val") -> dict[str, float]:
-    """Transcribe each image and score mean WER/CER vs its label — generation quality, not loss.
+def generation_metrics(adapter, items: list, prefix: str = "val") -> dict[str, float]:
+    """Transcribe each image and score mean WER/CER (+ code-validity) vs its label — generation
+    quality, not loss.
 
     `items` are (image, label, ...) tuples; `adapter` exposes `transcribe(list[image]) -> list[str]`.
     Generation-based (slow) — call on a small subset. `prefix` namespaces the keys (e.g. val / eval).
@@ -32,5 +36,11 @@ def transcription_metrics(adapter, items: list, prefix: str = "val") -> dict[str
     preds = [adapter.transcribe([it[0]])[0] for it in items]
     refs = [it[1] for it in items]
     n = len(items)
-    return {f"{prefix}/wer": sum(wer(p, r) for p, r in zip(preds, refs)) / n,
-            f"{prefix}/cer": sum(cer(p, r) for p, r in zip(preds, refs)) / n}
+    out = {f"{prefix}/wer": sum(wer(p, r) for p, r in zip(preds, refs)) / n,
+           f"{prefix}/cer": sum(cer(p, r) for p, r in zip(preds, refs)) / n}
+    # code-validity (no-exec): does generated HTML parse / Python compile? Uses the corpus tag (3rd
+    # element, present for the mix) to pick the kind; None when no item has a code target.
+    kinds = [CORPUS_KIND.get(it[2]) if len(it) > 2 else None for it in items]
+    if (rate := code_validity_rate(preds, kinds)) is not None:
+        out[f"{prefix}/code_valid"] = rate
+    return out

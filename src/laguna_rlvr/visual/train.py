@@ -27,7 +27,7 @@ from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_b
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
 from laguna_rlvr.visual.corpora import CHOICES, build_corpus, parse_mixture
 from laguna_rlvr.visual.encoders import load_encoder
-from laguna_rlvr.visual.metrics import transcription_metrics
+from laguna_rlvr.visual.metrics import generation_metrics
 from laguna_rlvr.visual.model import VisualAdapter
 
 _DEFAULT_CONFIG = "configs/mm_adapter/a100-80gb-laguna-bf16.toml"
@@ -201,7 +201,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             eval_loss, _ = _val_loss(adapter, eval_loader)
                             metrics["eval/loss"] = eval_loss
                         if step % gen_every == 0:  # WER/CER (generation) on a coarser cadence
-                            metrics.update(transcription_metrics(adapter, wer_items, "val"))
+                            metrics.update(generation_metrics(adapter, wer_items, "val"))
                         wer_str = f"  wer {metrics['val/wer']:.3f} cer {metrics['val/cer']:.3f}" if "val/wer" in metrics else ""
                         print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience}){wer_str}", flush=True)
                         if run:
