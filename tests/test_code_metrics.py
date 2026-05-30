@@ -14,6 +14,8 @@ def test_parses_html_rejects_plain_text():
 def test_compiles_python():
     assert compiles_python("import matplotlib.pyplot as plt\nplt.plot([1, 2])")
     assert not compiles_python("def (:")  # syntax error
+    assert not compiles_python("")  # empty -> no statements
+    assert not compiles_python("# only a comment")  # parses but no statements, not real code
 
 
 def test_validity_rate_scores_only_code_targets():
@@ -40,7 +42,7 @@ def test_generation_metrics_scopes_wer_cer_to_ocr():
     from laguna_rlvr.visual.metrics import generation_metrics
 
     class _Adapter:  # transcribe returns the OCR ref verbatim, ignoring the image
-        def transcribe(self, _imgs):
+        def transcribe(self, _imgs, max_new_tokens=48):
             return ["hello world"]
 
     items = [(None, "hello world", "synthetic"),  # kind None (OCR) -> exact match, wer/cer 0

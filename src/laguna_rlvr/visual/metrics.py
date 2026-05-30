@@ -5,6 +5,9 @@ import jiwer
 from laguna_rlvr.visual.code_metrics import code_validity_rate, codebleu_score
 from laguna_rlvr.visual.corpora import CORPUS_KIND
 
+_OCR_GEN_TOKENS = 48    # short transcription targets
+_CODE_GEN_TOKENS = 512  # code/HTML need room to form a compilable/parseable unit (matches label cap)
+
 
 def _error_rate(pred: str, ref: str, fn) -> float:
     """A jiwer error rate with an empty-ref guard: 0.0 if pred is also empty, else 1.0."""
@@ -32,10 +35,12 @@ def generation_metrics(adapter, items: list, prefix: str = "val") -> dict[str, f
     """
     if not items:
         return {}
-    # one image per call: the encoder can't stack variable-resolution images into a batch.
-    preds = [adapter.transcribe([it[0]])[0] for it in items]
-    refs = [it[1] for it in items]
     kinds = [CORPUS_KIND.get(it[2]) if len(it) > 2 else None for it in items]
+    # one image per call (variable-resolution images can't batch). Code targets get a longer budget —
+    # a 48-token OCR cap truncates code mid-statement, making validity/codebleu meaningless.
+    preds = [adapter.transcribe([it[0]], max_new_tokens=_OCR_GEN_TOKENS if k is None else _CODE_GEN_TOKENS)[0]
+             for it, k in zip(items, kinds)]
+    refs = [it[1] for it in items]
     out: dict[str, float] = {}
     # WER/CER are transcription metrics — meaningful only for OCR-style text targets (kind None).
     # On long code/HTML, exact-match explodes (WER >> 1), so code corpora ride on code_valid + codebleu.

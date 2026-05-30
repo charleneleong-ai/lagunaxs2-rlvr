@@ -7,6 +7,7 @@ running anything.
 """
 from __future__ import annotations
 
+import ast
 from html.parser import HTMLParser
 
 
@@ -26,10 +27,13 @@ def parses_html(text: str) -> bool:
 
 
 def compiles_python(text: str) -> bool:
-    """True if `text` is syntactically valid Python (compile only — never executes)."""
+    """True if `text` parses as Python with at least one statement (parse only — never executes).
+
+    The `body` check rejects empty / whitespace / comment-only fragments so trivial generations (which
+    parse fine) don't count as valid code.
+    """
     try:
-        compile(text, "<generated>", "exec")
-        return True
+        return bool(ast.parse(text).body)
     except (SyntaxError, ValueError):
         return False
 
