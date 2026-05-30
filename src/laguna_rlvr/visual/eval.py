@@ -11,8 +11,8 @@ import argparse
 from pathlib import Path
 
 import torch
-from transformers import AutoImageProcessor, AutoModelForImageTextToText
 
+from laguna_rlvr.visual.baseline import glm_ocr_transcribe
 from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.metrics import cer, generation_metrics
@@ -25,18 +25,11 @@ def _adapter_cer(adapter: VisualAdapter, ds: SyntheticOCR) -> float:
     return generation_metrics(adapter, list(ds), prefix="adapter")["adapter/metrics/cer"]
 
 
-@torch.no_grad()
 def _glm_baseline_cer(ds: SyntheticOCR, device: str) -> float:
     """Zero-training floor: GLM-OCR reads the image directly (image -> OCR -> text)."""
-    repo = "zai-org/GLM-OCR"
-    model = AutoModelForImageTextToText.from_pretrained(repo, device_map=device).eval()
-    proc = AutoImageProcessor.from_pretrained(repo)
-    scores = []
-    for img, label in ds:
-        batch = proc(images=[img], return_tensors="pt").to(model.device)
-        gen = model.generate(**batch, max_new_tokens=48, do_sample=False)
-        scores.append(cer(proc.batch_decode(gen, skip_special_tokens=True)[0], label))
-    return sum(scores) / len(scores)
+    items = list(ds)
+    preds = glm_ocr_transcribe(items, device=device)
+    return sum(cer(p, label) for p, (_, label) in zip(preds, items)) / len(items)
 
 
 def evaluate(encoder: str, base: str, ckpt: str, n_eval: int, pool: int,
