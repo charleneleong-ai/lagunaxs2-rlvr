@@ -18,12 +18,10 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 
 from laguna_rlvr.visual.corpora import CORPUS_KIND, TASK_PROMPT, build_corpus
 from laguna_rlvr.visual.encoders import _REPOS  # canonical model-id registry (avoid a 2nd source of truth)
-from laguna_rlvr.visual.metrics import score_predictions
+from laguna_rlvr.visual.metrics import _CODE_GEN_TOKENS, _OCR_GEN_TOKENS, score_predictions  # gen budgets: one source
 from laguna_rlvr.visual.model import load_causal_lm
 
 _OCR_PROMPT = "Transcribe all text visible in this image, preserving order."
-_OCR_GEN_TOKENS = 48     # short transcription targets
-_CODE_GEN_TOKENS = 512   # code/HTML need room to form a parseable unit (matches the training label cap)
 _QA_GEN_TOKENS = 24      # multi-turn QA replies are short ("the title is …")
 
 app = typer.Typer(add_completion=False)
@@ -95,12 +93,23 @@ def text_chat(llm, tok, turn_texts: list[str], max_new_tokens: int = _QA_GEN_TOK
     return replies
 
 
+def staged_base_llm(base_llm: str, device: str, transcribe=None):
+    """Stage the GPU so two multi-GB models never co-reside: run `transcribe` first (it loads + frees
+    GLM-OCR), then load the base LLM alone. Returns (transcripts_or_None, llm, tok). Shared by both
+    axes — the gc + empty_cache ordering is the load-bearing co-residence guard, kept in one place.
+    """
+    transcripts = transcribe() if transcribe is not None else None
+    if transcribe is not None:
+        gc.collect()
+        torch.cuda.empty_cache()
+    llm, tok = load_causal_lm(base_llm, device, torch.bfloat16)
+    return transcripts, llm, tok
+
+
 def run_axis_a(dataset: str, baselines: list[str], n_eval: int, base_llm: str,
                device: str = "cuda") -> dict[str, dict[str, float]]:
     """Single-turn generation panel: each baseline's predictions on `dataset`, scored by corpus kind.
-
-    Staged GPU — OCR-transcribe all images (load + free GLM-OCR) before the base LLM loads, so the
-    two models never co-reside. Returns {baseline_name: {metric: value}}.
+    Staged GPU (see `staged_base_llm`). Returns {baseline_name: {metric: value}}.
     """
     items = list(build_corpus(dataset, n_eval))
     refs = [it[1] for it in items]
@@ -109,13 +118,8 @@ def run_axis_a(dataset: str, baselines: list[str], n_eval: int, base_llm: str,
     task = TASK_PROMPT.get(kind, TASK_PROMPT[None])
     max_new = _OCR_GEN_TOKENS if kind is None else _CODE_GEN_TOKENS
 
-    transcripts = None
-    if "ocr" in baselines:  # stage 1: GLM-OCR reads every image, then is dropped (local var) + freed
-        transcripts = glm_ocr_transcribe(items, device=device)
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    llm, tok = load_causal_lm(base_llm, device, torch.bfloat16)  # stage 2: base Laguna, alone on-device
+    transcribe = (lambda: glm_ocr_transcribe(items, device=device)) if "ocr" in baselines else None
+    transcripts, llm, tok = staged_base_llm(base_llm, device, transcribe)
     results = {}
     for name in baselines:
         per_item = transcripts if name == "ocr" else [None] * len(items)  # blind = no transcript
@@ -138,19 +142,27 @@ def baseline(
     base: str = typer.Option(..., help="base LLM checkpoint (frozen, no adapter)"),
     n_eval: int = typer.Option(64, help="held-out items to score"),
     device: str = typer.Option("cuda"),
+    qa: bool = typer.Option(False, "--qa", help="also run Axis B (multi-turn multimodal QA)"),
     use_wandb: bool = typer.Option(False, "--wandb/--no-wandb", help="log to Weights & Biases"),
 ) -> None:
-    """Stage-0 baseline panel: frozen base LLM on a corpus, blind vs OCR-mediated."""
+    """Stage-0 baseline panel: frozen base LLM, blind vs OCR-mediated — single-turn (Axis A) + QA (B)."""
     names = [b.strip() for b in baselines.split(",") if b.strip()]
-    results = run_axis_a(dataset, names, n_eval, base, device)
-    _print_results(dataset, results)
+    axis_a = run_axis_a(dataset, names, n_eval, base, device)
+    _print_results(dataset, axis_a)
+    axis_b: dict[str, dict[str, float]] = {}
+    if qa:
+        # local import: the QA panel lives in multiturn_qa (which imports this module for its engine
+        # primitives); importing it at module top would cycle.
+        from laguna_rlvr.visual.multiturn_qa import run_multiturn_qa_panel
+        axis_b = run_multiturn_qa_panel(names, n_eval, base, device)
+        _print_results("multiturn-qa", axis_b)
     if use_wandb:
         import wandb
         if not os.environ.get("WANDB_API_KEY"):
             os.environ.setdefault("WANDB_MODE", "offline")
         run = wandb.init(project="laguna-mm-adapter", name=f"baseline-{dataset}",
                          config={"base": base, "dataset": dataset, "baselines": names, "n_eval": n_eval})
-        run.log({k: v for m in results.values() for k, v in m.items()})
+        run.log({k: v for panel in (axis_a, axis_b) for m in panel.values() for k, v in m.items()})
         run.finish()
 
 
