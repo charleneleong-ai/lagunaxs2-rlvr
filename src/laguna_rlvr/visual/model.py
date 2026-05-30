@@ -11,6 +11,10 @@ from laguna_rlvr.visual.projector import Projector
 
 IMAGE_TOKEN = "<image>"
 _PROMPT = f"{IMAGE_TOKEN}\nTranscribe the text in the image:"
+# Cap label length: the full-vocab (100K) LM-head logits scale with sequence length, so long
+# WebSight/WebCode2M HTML targets OOM the 33B backbone at the loss (caught 2026-05). 512 tokens is
+# ample for projector alignment; the full screenshot->code objective belongs to a later stage.
+_MAX_LABEL_TOKENS = 512
 
 
 @dataclass
@@ -145,7 +149,8 @@ class VisualAdapter(nn.Module):
         losses = []
         for b, label in enumerate(labels):
             prompt_e = self._embed_with_vision(_PROMPT, vis[b : b + 1])  # vision spliced at <image>
-            label_ids = self.tok(label, return_tensors="pt").input_ids.to(self.llm.device)
+            label_ids = self.tok(label, return_tensors="pt", truncation=True,
+                                  max_length=_MAX_LABEL_TOKENS).input_ids.to(self.llm.device)
             label_e = self.llm.get_input_embeddings()(label_ids)
             inputs = torch.cat([prompt_e, label_e], dim=1)
             mask = torch.full((1, prompt_e.shape[1]), -100, device=self.llm.device)
