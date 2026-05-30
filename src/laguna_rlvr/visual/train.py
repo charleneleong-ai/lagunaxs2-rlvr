@@ -112,6 +112,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
     loader = DataLoader(train_ds, batch_size=plan.micro_batch_size, shuffle=True, collate_fn=_collate)
     val_loader = DataLoader(val_ds, batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
+    eval_loader = (DataLoader(build_corpus(eval_dataset, 128), batch_size=plan.micro_batch_size,
+                              shuffle=False, collate_fn=_collate) if eval_dataset else None)  # fixed ext. eval
     val_every = max(50, min(max_steps // 10, 500))  # eval/early-stop cadence (bounded for high ceilings)
 
     # Scope the run identity by dataset too — otherwise different corpora on the same backbone share
@@ -191,8 +193,11 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                         else:
                             since_improve += 1
                         print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience})", flush=True)
+                        if eval_loader is not None:  # trend the fixed external eval alongside val
+                            eval_loss, _ = _val_loss(adapter, eval_loader)
                         if run:
                             run.log({"val/loss": last_val, "val/best": best_val,
+                                     **({"eval/loss": eval_loss} if eval_loader is not None else {}),
                                      **{f"val/loss/{cc}": v for cc, v in val_by_corpus.items()}}, step=step)
                         if since_improve >= patience:
                             print(f"early stop: no val improvement in {patience} evals", flush=True)
@@ -207,9 +212,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             if best_ckpt.exists():
                 adapter.projector.load_state_dict(torch.load(best_ckpt, map_location=adapter.llm.device))
             last_val = best_val
-            if eval_dataset:  # fixed external held-out ranker (same set for every mixture variant)
-                eval_loader = DataLoader(build_corpus(eval_dataset, 128),
-                                         batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
+            if eval_loader is not None:  # final ranker value, recomputed on the best checkpoint
                 eval_loss, _ = _val_loss(adapter, eval_loader)
                 print(f"  eval/{eval_dataset} loss {eval_loss:.4f}", flush=True)
                 if run:
