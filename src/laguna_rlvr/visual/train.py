@@ -286,7 +286,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             if qa_eval:  # does the single-turn projector transfer to multi-turn multimodal QA?
                 from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
 
-                qa = evaluate_multiturn_qa(adapter)
+                qa = evaluate_multiturn_qa(adapter, source="mixture")  # real-image QA (the target), final eval
                 qa_acc, qa_recall = qa["qa/metrics/accuracy"], qa["qa/metrics/recall"]
                 print(f"  multiturn QA: acc {qa_acc:.3f}  recall {qa_recall:.3f}", flush=True)
                 if run:
