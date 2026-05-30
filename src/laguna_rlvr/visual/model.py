@@ -178,8 +178,10 @@ class VisualAdapter(nn.Module):
         """
         if not images:
             return None
-        vis = self._project(images, anchor=False)  # raw — what the projector wants, pre-correction
-        return (vis.flatten(0, 1).float().norm(dim=-1).mean() / self._emb_norm_median).item()
+        # one image at a time then concat the per-token norms — variable-resolution images yield
+        # different patch counts, which `encoder.encode` can't stack into one batch (see its docstring).
+        norms = [self._project([img], anchor=False).flatten(0, 1).float().norm(dim=-1) for img in images]
+        return (torch.cat(norms).mean() / self._emb_norm_median).item()
 
     def forward(self, images: list, labels: list[str]) -> Output:
         vis = self._project(images)  # (B, Nv, D)
