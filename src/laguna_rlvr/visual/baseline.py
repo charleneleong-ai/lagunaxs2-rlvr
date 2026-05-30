@@ -93,40 +93,52 @@ def text_chat(llm, tok, turn_texts: list[str], max_new_tokens: int = _QA_GEN_TOK
     return replies
 
 
-def staged_base_llm(base_llm: str, device: str, transcribe=None):
-    """Stage the GPU so two multi-GB models never co-reside: run `transcribe` first (it loads + frees
-    GLM-OCR), then load the base LLM alone. Returns (transcripts_or_None, llm, tok). Shared by both
-    axes — the gc + empty_cache ordering is the load-bearing co-residence guard, kept in one place.
+def run_panels(dataset: str, baselines: list[str], n_eval: int, base_llm: str,
+               qa: bool, device: str = "cuda") -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+    """Both Stage-0 axes in ONE staged-GPU pass: GLM-OCR transcribes every image (Axis A corpus items
+    + Axis B episode images) and is freed, then a SINGLE base LLM scores both axes. Loading a base per
+    axis put two 33B models on one 80GB A100 and OOM'd — one shared base is the fix (and halves load).
+    Returns (axis_a single-turn, axis_b multi-turn QA — empty when `qa` is False).
     """
-    transcripts = transcribe() if transcribe is not None else None
-    if transcribe is not None:
+    # local import: the QA library imports this module for its engine primitives; top-level would cycle.
+    from laguna_rlvr.visual.multiturn_qa import (
+        blind_runner, image_fetcher, load_or_build_episodes, ocr_runner, run_qa, transcribe_episodes)
+
+    items = list(build_corpus(dataset, n_eval))
+    kind = CORPUS_KIND.get(dataset)
+    task = TASK_PROMPT.get(kind, TASK_PROMPT[None])
+    a_max = _OCR_GEN_TOKENS if kind is None else _CODE_GEN_TOKENS
+    episodes = load_or_build_episodes("mixture", n_eval, 0) if qa else []
+    want_ocr = "ocr" in baselines
+
+    a_transcripts = b_transcripts = None
+    if want_ocr:  # stage 1: ONE GLM-OCR session over every image (both axes), then freed
+        a_transcripts = glm_ocr_transcribe(items, device=device)
+        if qa:
+            b_transcripts = transcribe_episodes(episodes, image_fetcher(episodes), device=device)
         gc.collect()
         torch.cuda.empty_cache()
-    llm, tok = load_causal_lm(base_llm, device, torch.bfloat16)
-    return transcripts, llm, tok
 
+    llm, tok = load_causal_lm(base_llm, device, torch.bfloat16)  # stage 2: ONE base for both axes
 
-def run_axis_a(dataset: str, baselines: list[str], n_eval: int, base_llm: str,
-               device: str = "cuda") -> dict[str, dict[str, float]]:
-    """Single-turn generation panel: each baseline's predictions on `dataset`, scored by corpus kind.
-    Staged GPU (see `staged_base_llm`). Returns {baseline_name: {metric: value}}.
-    """
-    items = list(build_corpus(dataset, n_eval))
-    refs = [it[1] for it in items]
-    kind = CORPUS_KIND.get(dataset)
-    kinds = [kind] * len(items)
-    task = TASK_PROMPT.get(kind, TASK_PROMPT[None])
-    max_new = _OCR_GEN_TOKENS if kind is None else _CODE_GEN_TOKENS
-
-    transcribe = (lambda: glm_ocr_transcribe(items, device=device)) if "ocr" in baselines else None
-    transcripts, llm, tok = staged_base_llm(base_llm, device, transcribe)
-    results = {}
+    refs, kinds = [it[1] for it in items], [kind] * len(items)
+    axis_a: dict[str, dict[str, float]] = {}
     for name in baselines:
-        per_item = transcripts if name == "ocr" else [None] * len(items)  # blind = no transcript
-        prompts = [assemble_prompt(task, t) for t in per_item]
-        preds = text_generate(llm, tok, prompts, max_new_tokens=max_new)
-        results[name] = score_predictions(preds, refs, kinds, prefix=f"baseline/{name}")
-    return results
+        per_item = a_transcripts if name == "ocr" else [None] * len(items)  # blind = no transcript
+        preds = text_generate(llm, tok, [assemble_prompt(task, t) for t in per_item], max_new_tokens=a_max)
+        axis_a[name] = score_predictions(preds, refs, kinds, prefix=f"baseline/{name}")
+
+    axis_b: dict[str, dict[str, float]] = {}
+    if qa:
+        for name in baselines:
+            if name == "blind":
+                run = blind_runner(llm, tok)
+            elif name == "ocr":
+                run = ocr_runner(llm, tok, b_transcripts)
+            else:
+                continue
+            axis_b[name] = run_qa(run, episodes, prefix=f"qa/{name}")
+    return axis_a, axis_b
 
 
 def _print_results(dataset: str, results: dict[str, dict[str, float]]) -> None:
@@ -169,14 +181,9 @@ def baseline(
     """Stage-0 baseline panel: frozen base LLM, blind vs OCR-mediated — single-turn (Axis A) + QA (B).
     QA + W&B logging are on by default (--no-qa / --no-wandb to skip)."""
     names = [b.strip() for b in baselines.split(",") if b.strip()]
-    axis_a = run_axis_a(dataset, names, n_eval, base, device)
+    axis_a, axis_b = run_panels(dataset, names, n_eval, base, qa, device)
     _print_results(dataset, axis_a)
-    axis_b: dict[str, dict[str, float]] = {}
-    if qa:
-        # local import: the QA panel lives in multiturn_qa (which imports this module for its engine
-        # primitives); importing it at module top would cycle.
-        from laguna_rlvr.visual.multiturn_qa import run_multiturn_qa_panel
-        axis_b = run_multiturn_qa_panel(names, n_eval, base, device)
+    if axis_b:
         _print_results("multiturn-qa", axis_b)
     if use_wandb:
         import wandb
