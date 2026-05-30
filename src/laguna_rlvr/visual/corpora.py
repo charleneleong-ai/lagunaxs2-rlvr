@@ -36,6 +36,16 @@ def _webcode2m(n: int) -> Dataset:
     return HFImageTextDataset("xcodemind/webcode2m", n=n)  # real webpage design -> code
 
 
+def _chartmimic(n: int) -> Dataset:
+    from laguna_rlvr.visual.hf_image_text import HFImageTextDataset
+
+    # chart image -> matplotlib code (re-renderable, verifiable). ChartMimic is an eval benchmark,
+    # so exclude these instances from any chart eval to avoid leakage (cf. swebench_mm).
+    return HFImageTextDataset(
+        "ChartMimic/ChartMimic", config="chartmimic", split="test", n=n,
+        image_col="GroundTruthFigurePreview", text_col="GroundTruthFigureCode")
+
+
 class _Mixture(Dataset):
     """Weighted blend of corpora for full training — builds ~n×weight examples from each and
     concatenates them into one indexable dataset, so the model sees the corpora interleaved (the
@@ -64,7 +74,7 @@ class _Mixture(Dataset):
 
 
 # Default full-training mixture (WebSight-heavy; mirrors the corpus plan in the design doc).
-_DEFAULT_MIX = [("websight", 0.6), ("webcode2m", 0.3), ("swebench_mm", 0.1)]
+_DEFAULT_MIX = [("websight", 0.55), ("webcode2m", 0.25), ("chartmimic", 0.1), ("swebench_mm", 0.1)]
 
 
 def _mix(n: int) -> Dataset:
@@ -76,6 +86,7 @@ REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "swebench_mm": _swebench_mm,
     "websight": _websight,
     "webcode2m": _webcode2m,
+    "chartmimic": _chartmimic,
     "mix": _mix,
 }
 
