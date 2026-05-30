@@ -34,3 +34,18 @@ def test_codebleu_scores_python_only():
 
 def test_codebleu_none_without_python():
     assert codebleu_score(["<a>1</a>"], ["<a>1</a>"], ["html"]) is None
+
+
+def test_generation_metrics_scopes_wer_cer_to_ocr():
+    from laguna_rlvr.visual.metrics import generation_metrics
+
+    class _Adapter:  # transcribe returns the OCR ref verbatim, ignoring the image
+        def transcribe(self, _imgs):
+            return ["hello world"]
+
+    items = [(None, "hello world", "synthetic"),  # kind None (OCR) -> exact match, wer/cer 0
+             (None, "<p>x</p>", "websight")]       # kind html -> excluded from wer/cer
+    out = generation_metrics(_Adapter(), items)
+    # wer/cer scored over the OCR item only (==0); had the html item leaked in, wer would be >0
+    assert out["val/metrics/wer"] == 0.0 and out["val/metrics/cer"] == 0.0
+    assert "val/metrics/code_valid" in out  # html item still scored for validity
