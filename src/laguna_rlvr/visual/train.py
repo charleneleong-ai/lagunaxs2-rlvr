@@ -253,6 +253,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             eval_loss, _ = _val_loss(adapter, eval_loader)
                             metrics["eval/loss/total"] = eval_loss
                         if step % gen_every == 0:  # WER/CER (generation) on a coarser cadence
+                            torch.cuda.empty_cache()  # reclaim training fragmentation before generation (OOM margin)
                             metrics.update(generation_metrics(adapter, wer_items, "val"))
                             metrics.update(generation_metrics(adapter, ocr_probe, "val/ocr"))  # base-OCR retention
                             # base-preservation gauge — projected tokens in-distribution vs base embeds

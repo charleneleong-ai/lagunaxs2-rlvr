@@ -14,7 +14,8 @@ _PROMPT = f"{IMAGE_TOKEN}\nTranscribe the text in the image:"
 # Cap label length: the full-vocab (100K) LM-head logits scale with sequence length, so long
 # WebSight/WebCode2M HTML targets OOM the 33B backbone at the loss (caught 2026-05). 512 tokens is
 # ample for projector alignment; the full screenshot->code objective belongs to a later stage.
-_MAX_LABEL_TOKENS = 512
+_MAX_LABEL_TOKENS = 384   # label budget (was 512) — trimmed to keep the loss sequence under the OOM line
+_MAX_SEQ_TOKENS = 896     # skip (vision + label) sequences above this — their fp32 logits OOM the 80GB loss
 
 
 @dataclass
@@ -190,11 +191,18 @@ class VisualAdapter(nn.Module):
             prompt_e = self._embed_with_vision(_PROMPT, vis[b : b + 1])  # vision spliced at <image>
             label_ids = self.tok(label, return_tensors="pt", truncation=True,
                                   max_length=_MAX_LABEL_TOKENS).input_ids.to(self.llm.device)
+            # The full-vocab fp32 logits scale with sequence length; a long (vision + label) sequence
+            # OOMs the loss on an 80GB A100 (tall page screenshots, caught 2026-05). Skip those rather
+            # than crash — they're a small fraction, so the projector still learns on the rest.
+            if prompt_e.shape[1] + label_ids.shape[1] > _MAX_SEQ_TOKENS:
+                continue
             label_e = self.llm.get_input_embeddings()(label_ids)
             inputs = torch.cat([prompt_e, label_e], dim=1)
             mask = torch.full((1, prompt_e.shape[1]), -100, device=self.llm.device)
             tgt = torch.cat([mask, label_ids], dim=1)
             losses.append(self.llm(inputs_embeds=inputs, labels=tgt).loss)
+        if not losses:  # whole micro-batch skipped — 0 loss tied to the projector so backward is a no-op
+            return Output(loss=vis.sum() * 0.0)
         return Output(loss=torch.stack(losses).mean())
 
     @torch.no_grad()
