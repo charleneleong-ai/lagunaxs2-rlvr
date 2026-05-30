@@ -180,7 +180,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                         # single micro-example, and one CUDA sync per step rather than every micro-step.
                         last_loss = window.item()
                         if run:
-                            log = {"train/loss": last_loss}
+                            log = {"train/loss/total": last_loss}
                             for cc, (s, k) in cwin.items():
                                 log[f"train/loss/{cc}"] = (s * grad_accum / k).item()
                             run.log(log, step=step)
@@ -195,14 +195,15 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             torch.save(adapter.projector.state_dict(), best_ckpt)
                         else:
                             since_improve += 1
-                        metrics = {"val/loss": last_val, "val/best": best_val}
+                        metrics = {"val/loss/total": last_val, "val/loss/best": best_val}
                         metrics.update({f"val/loss/{cc}": v for cc, v in val_by_corpus.items()})
                         if eval_loader is not None:  # trend the fixed external eval alongside val
                             eval_loss, _ = _val_loss(adapter, eval_loader)
-                            metrics["eval/loss"] = eval_loss
+                            metrics["eval/loss/total"] = eval_loss
                         if step % gen_every == 0:  # WER/CER (generation) on a coarser cadence
                             metrics.update(generation_metrics(adapter, wer_items, "val"))
-                        wer_str = f"  wer {metrics['val/wer']:.3f} cer {metrics['val/cer']:.3f}" if "val/wer" in metrics else ""
+                        wer_str = (f"  wer {metrics['val/metrics/wer']:.3f} cer {metrics['val/metrics/cer']:.3f}"
+                                   if "val/metrics/wer" in metrics else "")
                         print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience}){wer_str}", flush=True)
                         if run:
                             run.log(metrics, step=step)
@@ -223,12 +224,12 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                 eval_loss, _ = _val_loss(adapter, eval_loader)
                 print(f"  eval/{eval_dataset} loss {eval_loss:.4f}", flush=True)
                 if run:
-                    run.log({"eval/loss": eval_loss}, step=step)
+                    run.log({"eval/loss/total": eval_loss}, step=step)
             if qa_eval:  # does the single-turn projector transfer to multi-turn multimodal QA?
                 from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
 
                 qa = evaluate_multiturn_qa(adapter)
-                qa_acc, qa_recall = qa["qa/accuracy"], qa["qa/recall"]
+                qa_acc, qa_recall = qa["qa/metrics/accuracy"], qa["qa/metrics/recall"]
                 print(f"  multiturn QA: acc {qa_acc:.3f}  recall {qa_recall:.3f}", flush=True)
                 if run:
                     run.log(qa, step=step)

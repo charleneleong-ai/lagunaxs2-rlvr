@@ -3,7 +3,7 @@
 No off-the-shelf multi-turn *multimodal* QA set exists for our (code/UI) domain with ground truth, so
 we synthesize one from SyntheticOCR — we *know* each image's text. Each episode shows two images,
 asks to read each, then a text-only follow-up that requires recalling the FIRST image. We score
-per-turn reading (`qa/accuracy`) AND cross-turn memory (`qa/recall`) by normalized-substring match.
+per-turn reading (`qa/metrics/accuracy`) AND cross-turn memory (`qa/metrics/recall`) by substring match.
 
 This measures whether a *single-turn-trained* projector transfers to multi-turn (agentic) use via the
 frozen LLM + `<image>` splice. A gap motivates Stage-2 multi-turn training (agentic SFT, report §4.3.3).
@@ -38,4 +38,4 @@ def evaluate_multiturn_qa(adapter: VisualAdapter, n: int = 16, seed: int = 0,
             total += 1
             hits += _norm(expected) in _norm(reply)
         recall_hits += _norm(a) in _norm(r3)
-    return {"qa/accuracy": hits / max(total, 1), "qa/recall": recall_hits / max(n, 1)}
+    return {"qa/metrics/accuracy": hits / max(total, 1), "qa/metrics/recall": recall_hits / max(n, 1)}

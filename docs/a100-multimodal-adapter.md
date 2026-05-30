@@ -114,21 +114,25 @@ websight`) stay available for ablations.
 
 ## Metrics roadmap
 
-**Logged now** (W&B): `train/loss` + `val/loss` (+ per-corpus `…/<corpus>`), `eval/loss` (Design2Code,
-fixed held-out — the cross-mixture ranker), `val/wer` + `val/cer` (transcription quality, coarser
-`gen_every` cadence), `qa/accuracy` + `qa/recall` (multi-turn multimodal probe).
+Keys are namespaced `<prefix>/loss/*` (losses) vs `<prefix>/metrics/*` (quality) so W&B groups them.
+
+**Logged now** (W&B):
+- *Losses* — `train/loss/total` + `val/loss/total` (+ per-corpus `…/loss/<corpus>`), `val/loss/best`,
+  `eval/loss/total` (Design2Code, fixed held-out — the cross-mixture ranker).
+- *Quality* — `val/metrics/wer` + `val/metrics/cer` (transcription, coarser `gen_every` cadence),
+  `val/metrics/code_valid` (HTML parses / Python `compile`s — no-exec), `val/metrics/codebleu`
+  (AST-aware structural match, python-kind targets only — codebleu has no HTML grammar),
+  `qa/metrics/accuracy` + `qa/metrics/recall` (multi-turn multimodal probe).
 
 **Planned (goal-faithful generation metrics — most valuable next):**
 - **Render-diff / visual match** — generate code → render (headless browser for HTML, matplotlib exec
   for charts) → SSIM / pixel-IoU / CLIP-image-sim vs the target screenshot. The actual objective + the
   RLVR reward. **Needs the code-execution sandbox** (don't exec model-generated code in-process) — Stage-3.
-- **Code validity / executability** — does the generated HTML parse / matplotlib code `compile`+run?
-  (binary pass-rate; the compile/parse half is safe + cheap, full exec is sandbox).
-- **Structural match** — CodeBLEU (AST-aware, needs the `codebleu` dep) / DOM-tree edit distance / the
-  Design2Code block-text-position-color metrics (WER/CER treats code as flat text).
+- **Structural match (HTML)** — extend the python-only CodeBLEU above with DOM-tree edit distance / the
+  Design2Code block-text-position-color metrics (codebleu has no HTML grammar; WER/CER treats code as flat text).
 
 **Planned (multi-turn, when outputs go open-ended / agentic):**
-- **Knowledge-retention curve** — generalize `qa/recall` to retention-vs-turn-distance (info from turn 1
+- **Knowledge-retention curve** — generalize `qa/metrics/recall` to retention-vs-turn-distance (info from turn 1
   used at turn k, multi-hop).
 - **LLM-as-judge** — for non-verifiable outputs ("explain this UI", "describe the chart") where
   exact-match/WER fail; rubric-scored, the report's Hive (§3.2.2) / IF-judge (§4.3.2) pattern.

@@ -22,7 +22,7 @@ _DEFAULT_CONFIG = "configs/mm_adapter/a100-40gb-projector.toml"
 
 
 def _adapter_cer(adapter: VisualAdapter, ds: SyntheticOCR) -> float:
-    return generation_metrics(adapter, list(ds), prefix="adapter")["adapter/cer"]
+    return generation_metrics(adapter, list(ds), prefix="adapter")["adapter/metrics/cer"]
 
 
 @torch.no_grad()

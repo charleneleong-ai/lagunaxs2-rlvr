@@ -52,5 +52,5 @@ class TestMultiTurnMultimodalQA:
         from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
 
         m = evaluate_multiturn_qa(adapter, n=2, max_new_tokens=4)
-        assert set(m) == {"qa/accuracy", "qa/recall"}
+        assert set(m) == {"qa/metrics/accuracy", "qa/metrics/recall"}
         assert all(0.0 <= v <= 1.0 for v in m.values())

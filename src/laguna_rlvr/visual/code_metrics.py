@@ -48,3 +48,17 @@ def code_validity_rate(preds: list[str], kinds: list[str | None]) -> float | Non
     if not scored:
         return None
     return sum(is_valid(p, k) for p, k in scored) / len(scored)
+
+
+def codebleu_score(preds: list[str], refs: list[str], kinds: list[str | None]) -> float | None:
+    """Corpus CodeBLEU (AST-aware structural match) over python-kind targets; None if there are none.
+
+    codebleu has no HTML grammar, so only `python` targets (e.g. chartmimic) are scored — HTML
+    structural similarity belongs to render-diff / DOM-edit (roadmap).
+    """
+    pairs = [(p, r) for p, r, k in zip(preds, refs, kinds) if k == "python"]
+    if not pairs:
+        return None
+    from codebleu import calc_codebleu  # tree-sitter-backed; import only when there are python items
+
+    return calc_codebleu([r for _, r in pairs], [p for p, _ in pairs], lang="python")["codebleu"]

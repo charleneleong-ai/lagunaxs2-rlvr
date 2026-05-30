@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jiwer
 
-from laguna_rlvr.visual.code_metrics import code_validity_rate
+from laguna_rlvr.visual.code_metrics import code_validity_rate, codebleu_score
 from laguna_rlvr.visual.corpora import CORPUS_KIND
 
 
@@ -36,11 +36,13 @@ def generation_metrics(adapter, items: list, prefix: str = "val") -> dict[str, f
     preds = [adapter.transcribe([it[0]])[0] for it in items]
     refs = [it[1] for it in items]
     n = len(items)
-    out = {f"{prefix}/wer": sum(wer(p, r) for p, r in zip(preds, refs)) / n,
-           f"{prefix}/cer": sum(cer(p, r) for p, r in zip(preds, refs)) / n}
-    # code-validity (no-exec): does generated HTML parse / Python compile? Uses the corpus tag (3rd
-    # element, present for the mix) to pick the kind; None when no item has a code target.
+    out = {f"{prefix}/metrics/wer": sum(wer(p, r) for p, r in zip(preds, refs)) / n,
+           f"{prefix}/metrics/cer": sum(cer(p, r) for p, r in zip(preds, refs)) / n}
+    # code-validity (no-exec) + CodeBLEU (structural), keyed off the corpus tag (3rd element, present
+    # for the mix) -> code kind; skipped when no item has a code target.
     kinds = [CORPUS_KIND.get(it[2]) if len(it) > 2 else None for it in items]
     if (rate := code_validity_rate(preds, kinds)) is not None:
-        out[f"{prefix}/code_valid"] = rate
+        out[f"{prefix}/metrics/code_valid"] = rate
+    if (cb := codebleu_score(preds, refs, kinds)) is not None:
+        out[f"{prefix}/metrics/codebleu"] = cb
     return out
