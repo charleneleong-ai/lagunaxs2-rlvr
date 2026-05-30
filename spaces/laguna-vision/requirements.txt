@@ -1,8 +1,10 @@
 # Self-contained: the laguna_rlvr.visual subset (model/encoders/projector) is vendored into this folder,
 # so we install only its runtime deps — NOT the full package (whose pyproject pulls private deps like
 # `autoresearch`, not on PyPI, which breaks the build). compressed-tensors for the NVFP4 base path,
-# accelerate for large-model loading, tiktoken/sentencepiece for the GLM-OCR tokenizer.
+# accelerate for large-model loading, torchvision for the GLM-OCR image processor, tiktoken/
+# sentencepiece for the GLM-OCR tokenizer.
 torch
+torchvision
 transformers
 accelerate
 compressed-tensors
