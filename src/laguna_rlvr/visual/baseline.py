@@ -142,7 +142,9 @@ def _log_wandb(run, panels: dict[str, dict[str, dict[str, float]]]) -> None:
     import wandb
     flat: dict[str, float] = {}
     for axis, panel in panels.items():
-        if not panel:
+        if not panel:  # warn rather than silently drop — an empty QA panel means no episodes built
+            print(f"WARN: '{axis}' panel empty — nothing logged for it (built no episodes/results?)",
+                  flush=True)
             continue
         cols = sorted({k.rsplit("/", 1)[-1] for m in panel.values() for k in m})
         table = wandb.Table(columns=["baseline", *cols])
@@ -161,10 +163,11 @@ def baseline(
     base: str = typer.Option(..., help="base LLM checkpoint (frozen, no adapter)"),
     n_eval: int = typer.Option(64, help="held-out items to score"),
     device: str = typer.Option("cuda"),
-    qa: bool = typer.Option(False, "--qa", help="also run Axis B (multi-turn multimodal QA)"),
-    use_wandb: bool = typer.Option(False, "--wandb/--no-wandb", help="log to Weights & Biases"),
+    qa: bool = typer.Option(True, "--qa/--no-qa", help="also run Axis B (multi-turn multimodal QA)"),
+    use_wandb: bool = typer.Option(True, "--wandb/--no-wandb", help="log to Weights & Biases"),
 ) -> None:
-    """Stage-0 baseline panel: frozen base LLM, blind vs OCR-mediated — single-turn (Axis A) + QA (B)."""
+    """Stage-0 baseline panel: frozen base LLM, blind vs OCR-mediated — single-turn (Axis A) + QA (B).
+    QA + W&B logging are on by default (--no-qa / --no-wandb to skip)."""
     names = [b.strip() for b in baselines.split(",") if b.strip()]
     axis_a = run_axis_a(dataset, names, n_eval, base, device)
     _print_results(dataset, axis_a)
