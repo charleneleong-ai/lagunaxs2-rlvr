@@ -20,11 +20,13 @@ class HFImageTextDataset(Dataset):
     """(screenshot, code) pairs streamed from an HF dataset with embedded image + text columns."""
 
     def __init__(self, repo: str, *, config: str | None = None, split: str = "train",
-                 n: int = 2000, image_col: str = "image", text_col: str = "text",
+                 n: int = 2000, offset: int = 0, image_col: str = "image", text_col: str = "text",
                  max_text_chars: int = 2048):
         stream = load_dataset(repo, config, split=split, streaming=True)
         items: list[tuple] = []
-        for row in track(islice(stream, n), total=n, description=f"{repo} ({n})"):
+        # offset skips the first `offset` rows — used to carve a held-out eval slice disjoint from
+        # the training range (which streams from row 0).
+        for row in track(islice(stream, offset, offset + n), total=n, description=f"{repo} ({n})"):
             img, txt = row.get(image_col), row.get(text_col)
             if img is not None and txt:
                 items.append((img.convert("RGB"), txt[:max_text_chars]))

@@ -5,6 +5,7 @@ common_overrides:
   steps: 800
   n_train: 2000
   pool: 8
+  eval_dataset: design2code   # fixed external held-out ranker (same unseen set for every variant)
 
 variants:
   - name: websight-heavy   # the current default prior

@@ -2,10 +2,10 @@
 
     uv run python scripts/mixture_sweep.py configs/schedules/mixture_sweep.yaml
 
-Runs each variant as a short `train.py --dataset mix --mixture ... --name-suffix <variant>` (sequential,
-one GPU) and ranks by the run's final val_loss. NOTE: each run's val is its own mix's 90/10 split, not a
-shared eval — so the ranking is indicative. A fixed Design2Code held-out eval is the principled ranker and
-is the next step (see docs).
+Runs each variant as a short `train.py --dataset mix --mixture ... --eval-dataset <fixed>` (sequential,
+one GPU) and ranks by eval_loss on the FIXED held-out eval (default design2code) — the same unseen set
+for every variant, so the ranking is attributable to the mixture (AutoMixer §3.2.3). val_loss (in-mix
+90/10) is also logged per run, for diagnosing under-training vs genuinely-worse.
 """
 from __future__ import annotations
 
@@ -25,7 +25,8 @@ _ENCODER, _BASE = "glm_ocr", "Laguna-XS.2"  # the default setup this sweep targe
 def main(schedule: Path) -> None:
     spec = yaml.safe_load(schedule.read_text())
     common = spec.get("common_overrides", {})
-    ranking: list[tuple[str, str, float | None]] = []
+    eval_dataset = common.get("eval_dataset", "design2code")
+    ranking: list[tuple[str, str, float | None, float | None]] = []
     for variant in spec["variants"]:
         name, weights = variant["name"], variant["weights"]
         mixture = ",".join(f"{k}={w}" for k, w in weights.items())
@@ -33,6 +34,7 @@ def main(schedule: Path) -> None:
         subprocess.run(
             [sys.executable, "-m", "laguna_rlvr.visual.train",
              "--dataset", "mix", "--mixture", mixture, "--name-suffix", name,
+             "--eval-dataset", eval_dataset,
              "--steps", str(common.get("steps", 800)),
              "--n-train", str(common.get("n_train", 2000)),
              "--pool", str(common.get("pool", 8))],
@@ -40,12 +42,16 @@ def main(schedule: Path) -> None:
         )
         res = load_results(experiments_dir="experiments", tag="mm_adapter",
                            config_name=f"{_ENCODER}__{_BASE}__mix__{name}")
-        ranking.append((name, mixture, res[-1].get("val_loss") if res else None))
+        row = res[-1] if res else {}
+        ranking.append((name, mixture, row.get("eval_loss"), row.get("val_loss")))
 
     ranking.sort(key=lambda r: r[2] if r[2] is not None else float("inf"))
-    print("\n=== mixture sweep ranking (val_loss — lower is better; in-run val, not a shared eval) ===")
-    for name, mixture, val in ranking:
-        print(f"  {f'{val:.4f}' if val is not None else 'n/a':>8}  {name}  ({mixture})")
+    print(f"\n=== mixture sweep ranking by eval/loss on '{eval_dataset}' (lower is better) ===")
+    print(f"  {'eval':>8}  {'val':>8}  variant")
+    for name, mixture, ev, val in ranking:
+        ev_s = f"{ev:.4f}" if ev is not None else "n/a"
+        val_s = f"{val:.4f}" if val is not None else "n/a"
+        print(f"  {ev_s:>8}  {val_s:>8}  {name}  ({mixture})")
 
 
 if __name__ == "__main__":

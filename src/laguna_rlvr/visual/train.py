@@ -72,7 +72,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           steps: int | None = None, n_train: int = 512, pool: int = 4,
           projector_kind: str = "linear", out: str = "results/visual",
           seed: int = DEFAULT_SEED, dataset: str = "synthetic", use_wandb: bool = True,
-          resume: bool = True, mixture: str = "", name_suffix: str = "") -> Path:
+          resume: bool = True, mixture: str = "", name_suffix: str = "",
+          eval_dataset: str = "") -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -137,7 +138,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     # GPUMonitor samples nvidia-smi in the background; always log a results.jsonl row (even on
     # crash/SIGINT) so the sweep tracker sees CRASH instead of a silently-vanished iter.
     t0 = time.monotonic()
-    step, last_loss, last_val, status = start_step, float("nan"), float("nan"), "CRASH"
+    step, last_loss, last_val, eval_loss, status = (
+        start_step, float("nan"), float("nan"), float("nan"), "CRASH")
     monitor = GPUMonitor()
     try:
         with monitor:
@@ -168,6 +170,13 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             last_val = _val_loss(adapter, val_loader)
             if run:
                 run.log({"val/loss": last_val}, step=step)
+            if eval_dataset:  # fixed external held-out ranker (same set for every mixture variant)
+                eval_loader = DataLoader(build_corpus(eval_dataset, 128),
+                                         batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
+                eval_loss = _val_loss(adapter, eval_loader)
+                print(f"  eval/{eval_dataset} loss {eval_loss:.4f}", flush=True)
+                if run:
+                    run.log({"eval/loss": eval_loss}, step=step)
         torch.save(adapter.projector.state_dict(), ckpt)
         print(f"saved projector -> {ckpt} (train {last_loss:.4f}, val {last_val:.4f})", flush=True)
         status = "KEEP"
@@ -176,8 +185,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         gpu = monitor.summary()
         print(monitor.format_summary(), flush=True)
         if run:
-            run.summary.update({"final_loss": last_loss, "val_loss": last_val, "status": status,
-                                "gpu_peak_mem_gb": gpu.peak_mem_gb,
+            run.summary.update({"final_loss": last_loss, "val_loss": last_val, "eval_loss": eval_loss,
+                                "status": status, "gpu_peak_mem_gb": gpu.peak_mem_gb,
                                 "gpu_mean_util_pct": gpu.mean_util_pct})
             run.finish()
         log_experiment(
@@ -186,7 +195,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             description=f"visual projector ({projector_kind}) on {base} [{dataset}]",
             wandb_url=run.url if run else "",
             runtime_min=(time.monotonic() - t0) / 60,
-            extra={"final_loss": last_loss, "val_loss": last_val, "backbone": base,
+            extra={"final_loss": last_loss, "val_loss": last_val, "eval_loss": eval_loss,
+                   "eval_dataset": eval_dataset, "backbone": base,
                    "encoder": encoder, "dataset": dataset,
                    "gpu_mean_util_pct": round(gpu.mean_util_pct, 1),
                    "gpu_peak_mem_gb": round(gpu.peak_mem_gb, 1),
@@ -214,9 +224,10 @@ def main(
     resume: bool = typer.Option(True, "--resume/--no-resume", help="resume from resume.pt if present"),
     mixture: str = typer.Option("", help="override mix weights, e.g. 'websight=0.6,webcode2m=0.4'"),
     name_suffix: str = typer.Option("", help="appended to the run name (isolates sweep variants)"),
+    eval_dataset: str = typer.Option("", help="fixed held-out eval corpus, e.g. design2code (logs eval/loss)"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
-          resume, mixture, name_suffix)
+          resume, mixture, name_suffix, eval_dataset)
 
 
 if __name__ == "__main__":

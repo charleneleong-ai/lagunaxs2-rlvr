@@ -46,6 +46,12 @@ def _chartmimic(n: int) -> Dataset:
         image_col="GroundTruthFigurePreview", text_col="GroundTruthFigureCode")
 
 
+def _design2code(n: int) -> Dataset:
+    from laguna_rlvr.visual.design2code import Design2Code
+
+    return Design2Code(n=n)  # EVAL ONLY (held-out external ranker) — never put in the training mix
+
+
 class _Mixture(Dataset):
     """Weighted blend of corpora for full training — builds ~n×weight examples from each and
     concatenates them into one indexable dataset, so the model sees the corpora interleaved (the
@@ -86,6 +92,7 @@ REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "websight": _websight,
     "webcode2m": _webcode2m,
     "chartmimic": _chartmimic,
+    "design2code": _design2code,  # eval-only fixed held-out ranker (don't train on it)
 }
 CHOICES = [*REGISTRY, "mix"]
 
