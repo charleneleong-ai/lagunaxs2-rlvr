@@ -274,9 +274,14 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             if qa_eval:  # track multimodal QA emergence during training (coarse — generation is slow)
                                 from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
                                 metrics.update(evaluate_multiturn_qa(adapter, n=8, source="mixture"))
-                        wer_str = (f"  wer {metrics['val/metrics/wer']:.3f} cer {metrics['val/metrics/cer']:.3f}"
-                                   if "val/metrics/wer" in metrics else "")
-                        print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience}){wer_str}", flush=True)
+                        gen_str = ""  # surface the generation-cadence metrics in the text log, not just W&B
+                        if "val/metrics/wer" in metrics:
+                            gen_str += f"  wer {metrics['val/metrics/wer']:.3f} cer {metrics['val/metrics/cer']:.3f}"
+                        if "val/metrics/embed_norm_ratio" in metrics:
+                            gen_str += f"  embed_norm {metrics['val/metrics/embed_norm_ratio']:.3f}"
+                        if "qa/metrics/accuracy" in metrics:
+                            gen_str += f"  qa_acc {metrics['qa/metrics/accuracy']:.3f} qa_rec {metrics['qa/metrics/recall']:.3f}"
+                        print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience}){gen_str}", flush=True)
                         if run:
                             run.log(metrics, step=step)
                         if since_improve >= patience:
