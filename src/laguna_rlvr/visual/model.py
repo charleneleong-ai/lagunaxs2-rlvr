@@ -244,7 +244,8 @@ class VisualAdapter(nn.Module):
             return Output(loss=vis.sum() * 0.0)
         return Output(loss=torch.stack(losses).mean())
 
-    def forward_qa(self, images: list, answers: list[str], corpora: list) -> Output:
+    def forward_qa(self, images: list, answers: list[str], corpora: list,
+                   questions: list | None = None) -> Output:
         """QA-SFT loss: masked CE on the answer to (image, per-kind question). The answer is a
         label-derived needle (chart/page title) that is NOT in the question, so the loss can only drop
         by USING the image — forcing the projector to convey vision. (Reconstruction lets the frozen
@@ -253,7 +254,8 @@ class VisualAdapter(nn.Module):
         vis = self._project(images)
         losses = []
         for b, (answer, corpus) in enumerate(zip(answers, corpora)):
-            prompt = f"{IMAGE_TOKEN}\n{read_question(CORPUS_KIND.get(corpus))}\nAnswer:"
+            q = (questions[b] if questions and questions[b] else read_question(CORPUS_KIND.get(corpus)))
+            prompt = f"{IMAGE_TOKEN}\n{q}\nAnswer:"
             prompt_e = self._embed_with_vision(prompt, vis[b : b + 1])
             ans_ids = self.tok(" " + answer, return_tensors="pt", add_special_tokens=False,
                                truncation=True, max_length=_MAX_LABEL_TOKENS).input_ids.to(self.llm.device)

@@ -14,6 +14,8 @@ screenshot->code objective with untruncated code belongs to the later long-conte
 from __future__ import annotations
 
 import os
+from collections import Counter
+from collections.abc import Callable
 from itertools import islice
 from pathlib import Path
 
@@ -27,22 +29,28 @@ from torch.utils.data import Dataset
 _CACHE_DIR = Path(os.environ.get("LAGUNA_DATA_CACHE", Path.home() / ".cache" / "laguna-mm" / "corpora"))
 
 
+def _cached_or_stream(key: str, stream_fn: Callable[[], HFDataset]) -> HFDataset:
+    """Disk-cached materialization: load the streamed rows from `_CACHE_DIR/key`, or run `stream_fn`
+    once and cache it. Shared by the dataset classes so the cache contract lives in one place."""
+    cache = _CACHE_DIR / key.replace("/", "_")
+    if cache.exists():
+        return load_from_disk(str(cache))
+    ds = stream_fn()
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    ds.save_to_disk(str(cache))
+    return ds
+
+
 class HFImageTextDataset(Dataset):
     """(screenshot, code) pairs streamed from an HF dataset (embedded image + text), cached to disk."""
 
     def __init__(self, repo: str, *, config: str | None = None, split: str = "train",
                  n: int = 2000, offset: int = 0, image_col: str = "image", text_col: str = "text",
                  max_text_chars: int = 2048):
-        key = "__".join(str(p) for p in
-                        (repo, config, split, n, offset, image_col, text_col, max_text_chars)).replace("/", "_")
-        cache = _CACHE_DIR / key
-        if cache.exists():
-            self._ds = load_from_disk(str(cache))
-        else:
-            ds = self._stream(repo, config, split, n, offset, image_col, text_col, max_text_chars)
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            ds.save_to_disk(str(cache))
-            self._ds = ds  # in-memory Arrow; kept lazy — decode per access, not all n images up front
+        key = "__".join(str(p) for p in (repo, config, split, n, offset, image_col, text_col, max_text_chars))
+        # in-memory Arrow; kept lazy — decode per access, not all n images up front
+        self._ds = _cached_or_stream(
+            key, lambda: self._stream(repo, config, split, n, offset, image_col, text_col, max_text_chars))
 
     @staticmethod
     def _stream(repo: str, config: str | None, split: str, n: int, offset: int,
@@ -68,3 +76,45 @@ class HFImageTextDataset(Dataset):
     def __getitem__(self, i: int):
         row = self._ds[i]
         return row["image"], row["text"]
+
+
+class VQADataset(Dataset):
+    """(image, question, answer) triples from a VQA set (TextVQA/DocVQA): embedded image + a
+    per-example question + a list of annotator answers (majority vote). The answer is short, diverse
+    visible text in the image — the clean, unguessable reading supervision our title-needle corpora
+    lack. Same streaming + disk cache as HFImageTextDataset."""
+
+    def __init__(self, repo: str, *, config: str | None = None, split: str = "train", n: int = 2000,
+                 offset: int = 0, image_col: str = "image", q_col: str = "question", a_col: str = "answers",
+                 paired: bool = False):
+        key = "vqa__" + "__".join(str(p) for p in (repo, config, split, n, offset, paired))
+        self._ds = _cached_or_stream(
+            key, lambda: self._stream(repo, config, split, n, offset, image_col, q_col, a_col, paired))
+
+    @staticmethod
+    def _stream(repo, config, split, n, offset, image_col, q_col, a_col, paired) -> HFDataset:
+        stream = load_dataset(repo, config, split=split, streaming=True)
+        imgs, qs, ans = [], [], []
+        for row in track(islice(stream, offset, offset + n), total=n, description=f"{repo} ({n})"):
+            img, q, a = row.get(image_col), row.get(q_col), row.get(a_col)
+            if paired:  # q_col/a_col are PARALLEL lists (multiple Q&A per image, e.g. OCR-VQA): first pair
+                q = q[0] if isinstance(q, list) and q else q
+                a = a[0] if isinstance(a, list) and a else a
+            else:  # a_col is a list of annotator answers to the single question -> majority vote
+                a = Counter(a).most_common(1)[0][0] if isinstance(a, list) and a else a
+            if img is not None and q and a:
+                imgs.append(img.convert("RGB"))
+                qs.append(q)
+                ans.append(a)
+        if not imgs:
+            raise RuntimeError(f"no usable rows from {repo} (cols {image_col!r}/{q_col!r}/{a_col!r})")
+        return HFDataset.from_dict(
+            {"image": imgs, "question": qs, "answer": ans},
+            features=Features({"image": HFImage(), "question": Value("string"), "answer": Value("string")}))
+
+    def __len__(self) -> int:
+        return len(self._ds)
+
+    def __getitem__(self, i: int):
+        row = self._ds[i]
+        return row["image"], row["question"], row["answer"]

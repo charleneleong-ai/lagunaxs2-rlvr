@@ -39,7 +39,8 @@ def _collate(batch):
     cols = list(zip(*batch))
     images, labels = list(cols[0]), list(cols[1])
     corpora = list(cols[2]) if len(cols) > 2 else [None] * len(images)  # corpus tag (mix) or None
-    return images, labels, corpora
+    questions = list(cols[3]) if len(cols) > 3 else [None] * len(images)  # per-example QA question (VQA)
+    return images, labels, corpora, questions
 
 
 def _ocr_probe(seed: int, n: int = 32) -> list:
@@ -57,11 +58,11 @@ def _ocr_probe(seed: int, n: int = 32) -> list:
         return list(SyntheticOCR(n=16, seed=seed))
 
 
-def _loss(adapter: VisualAdapter, images, labels, corpora, objective: str):
+def _loss(adapter: VisualAdapter, images, labels, corpora, objective: str, questions=None):
     """Dispatch the training loss by objective: reconstruction (transcribe) vs QA-SFT (answer the
     per-kind question — forces vision use, since the needle answer isn't in the question)."""
     if objective == "qa":
-        return adapter.forward_qa(images, labels, corpora).loss
+        return adapter.forward_qa(images, labels, corpora, questions).loss
     return adapter(images, labels).loss
 
 
@@ -73,8 +74,8 @@ def _val_loss(adapter: VisualAdapter, loader: DataLoader, objective: str = "reco
         total, n = 0.0, 0
         per_sum: dict[str, float] = {}
         per_n: dict[str, int] = {}
-        for images, labels, corpora in loader:
-            li = _loss(adapter, images, labels, corpora, objective).item() * len(labels)
+        for images, labels, corpora, questions in loader:
+            li = _loss(adapter, images, labels, corpora, objective, questions).item() * len(labels)
             total += li
             n += len(labels)
             c = corpora[0]
@@ -128,7 +129,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
           qa_eval: bool = True, description: str = "", init_projector: str = "",
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
-          lr_override: float | None = None) -> Path:
+          lr_override: float | None = None, vqa: str = "") -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -152,9 +153,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     mix_specs = parse_mixture(mixture) if mixture else [
         (k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
     full = build_corpus(dataset, n_train, mixture=mix_specs)
-    if objective == "qa":  # QA-SFT: (image, needle, corpus) triples from needle-bearing rows
-        from laguna_rlvr.visual.corpora import QASFTDataset
-        full = QASFTDataset(full)
+    if objective == "qa":  # QA-SFT: (image, answer, corpus, question) from needle rows + VQA reading sets
+        from laguna_rlvr.visual.corpora import QASFTDataset, load_vqa
+        full = QASFTDataset(full, vqa_sources=load_vqa(vqa.split(","), n_train) if vqa else None)
     n_val = min(max(1, len(full) // 10), 256)  # 90/10 split, capped so frequent val stays cheap
     train_ds, val_ds = torch.utils.data.random_split(
         full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
@@ -231,8 +232,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             window = None  # GPU-side running sum of micro-losses → mean over the effective batch
             cwin: dict = {}  # per-corpus (loss-sum, count) over the batch, for per-corpus train logging
             while step < max_steps and not stop:
-                for images, labels, corpora in loader:
-                    loss = _loss(adapter, images, labels, corpora, objective) / grad_accum
+                for images, labels, corpora, questions in loader:
+                    loss = _loss(adapter, images, labels, corpora, objective, questions) / grad_accum
                     loss.backward()
                     window = loss.detach() if window is None else window + loss.detach()
                     c = corpora[0]  # micro_batch=1 → one corpus per step
@@ -372,10 +373,11 @@ def main(
     unfreeze: str = typer.Option("", help="'' = projector only | lora = + attention LoRA on the frozen LLM"),
     anchor: bool = typer.Option(True, "--anchor/--no-anchor", help="soft-scalar norm match on vision tokens"),
     lr: float = typer.Option(None, help="override the config learning rate"),
+    vqa: str = typer.Option("", help="comma-sep VQA reading sets to add to QA-SFT (e.g. textvqa)"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective, unfreeze, anchor, lr)
+          objective, unfreeze, anchor, lr, vqa)
 
 
 if __name__ == "__main__":
