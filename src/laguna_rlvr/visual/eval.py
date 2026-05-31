@@ -37,7 +37,7 @@ def evaluate(encoder: str, base: str, ckpt: str, n_eval: int, pool: int,
     ds = SyntheticOCR(n=n_eval, seed=10_000)  # held out from the training seed (0)
     enc = load_encoder(encoder, pool=pool)
     adapter = VisualAdapter(enc, base, projector_kind=projector_kind)
-    adapter.projector.load_state_dict(torch.load(ckpt, map_location=adapter.llm.device))
+    adapter.load_adapter_state_dict(torch.load(ckpt, map_location=adapter.llm.device))
     result = {"encoder": encoder, "base": Path(base).name, "adapter_cer": _adapter_cer(adapter, ds)}
     if baseline:
         result["glm_baseline_cer"] = _glm_baseline_cer(ds, adapter.device)

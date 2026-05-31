@@ -27,6 +27,7 @@ dependencies = [
     "tree-sitter-python==0.21.0",
     "tiktoken>=0.13.0",
     "sentencepiece>=0.2.1",
+    "peft>=0.19.1",
 ]
 
 [dependency-groups]

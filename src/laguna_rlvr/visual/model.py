@@ -88,16 +88,20 @@ class VisualAdapter(nn.Module):
         projector_kind: str = "linear",
         dtype: torch.dtype | None = None,
         device: str | None = None,
+        unfreeze: str = "",
     ):
         super().__init__()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = dtype or (torch.bfloat16 if self.device.startswith("cuda") else torch.float32)
         self.encoder = encoder
+        self.unfreeze = unfreeze
         self.llm, self.tok = load_causal_lm(base_llm, self.device, dtype)
         self._add_image_token()  # <image> marker + subtoken-avg init, before the freeze below
         self.llm.eval()
         for p in self.llm.parameters():
             p.requires_grad_(False)
+        if unfreeze == "lora":  # let the frozen decoder learn to *read* the projector tokens
+            self._apply_lora()
         # use_reentrant=False so grads still flow to the (trainable) projector even though
         # every LLM input embed is detached — reentrant checkpointing requires an input
         # that requires grad and would otherwise raise "none of the inputs require grad".
@@ -110,8 +114,36 @@ class VisualAdapter(nn.Module):
         # base-preservation gauge (embedding_norm_ratio) doesn't re-reduce the full vocab table per call.
         self._emb_norm_median = self.llm.get_input_embeddings().weight.float().norm(dim=-1).median()
 
+    def _apply_lora(self) -> None:
+        """Wrap the frozen LLM with attention-only LoRA (q/k/v/o). The MoE expert MLPs stay frozen —
+        adapting attention is the minimal lever for the decoder to attend to the projected vision
+        tokens, and keeps trainable params (+AdamW state) tiny enough to co-reside with the 33B base."""
+        from peft import LoraConfig, get_peft_model
+
+        cfg = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.0, bias="none", task_type="CAUSAL_LM",
+                         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])
+        self.llm = get_peft_model(self.llm, cfg)
+
     def trainable_parameters(self):
-        return self.projector.parameters()
+        return [p for p in self.parameters() if p.requires_grad]  # projector (+ LoRA if unfrozen)
+
+    def adapter_state_dict(self) -> dict:
+        """The trainable deliverable: projector always, plus LoRA deltas when unfrozen."""
+        sd = {"projector": self.projector.state_dict()}
+        if self.unfreeze == "lora":
+            from peft import get_peft_model_state_dict
+            # save_embedding_layers=False: the <image>-token resize trips peft's heuristic into
+            # dumping the frozen ~300M-param embedding matrix every save. It's frozen and
+            # deterministically reconstructed at load (subtoken-avg init), so saving it is pure bloat.
+            sd["lora"] = get_peft_model_state_dict(self.llm, save_embedding_layers=False)
+        return sd
+
+    def load_adapter_state_dict(self, sd: dict) -> None:
+        sd = sd if "projector" in sd else {"projector": sd}  # accept a legacy raw projector state_dict too
+        self.projector.load_state_dict(sd["projector"])
+        if "lora" in sd:
+            from peft import set_peft_model_state_dict
+            set_peft_model_state_dict(self.llm, sd["lora"])
 
     def _add_image_token(self) -> None:
         """Add an <image> placeholder token, embedding-initialized as the mean of its subtoken
