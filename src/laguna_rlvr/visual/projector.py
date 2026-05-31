@@ -16,10 +16,48 @@ def mean_pool(x: torch.Tensor, k: int) -> torch.Tensor:
     return x[:, :n_keep, :].reshape(b, n_keep // k, k, d).mean(dim=2)
 
 
+class _ResamplerBlock(nn.Module):
+    """One pre-LN cross-attention + FFN block: queries attend to the encoder features (kv)."""
+
+    def __init__(self, d: int, n_heads: int):
+        super().__init__()
+        self.ln_q, self.ln_kv, self.ln_ff = nn.LayerNorm(d), nn.LayerNorm(d), nn.LayerNorm(d)
+        self.attn = nn.MultiheadAttention(d, n_heads, batch_first=True)
+        self.ff = nn.Sequential(nn.Linear(d, 4 * d), nn.GELU(), nn.Linear(4 * d, d))
+
+    def forward(self, q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+        kvn = self.ln_kv(kv)
+        q = q + self.attn(self.ln_q(q), kvn, kvn, need_weights=False)[0]
+        return q + self.ff(self.ln_ff(q))
+
+
+class Resampler(nn.Module):
+    """Perceiver-style resampler: `n_queries` learned queries cross-attend to the (variable-length)
+    encoder features and emit a *fixed* `n_queries` tokens in the LLM space. This is the laguna-vision
+    recipe's connector — it both bridges d_in->d_out and compresses AnyRes tiles (global + hi-res crops,
+    thousands of patches) to a constant token budget, sidestepping variable-length splicing.
+    """
+
+    def __init__(self, d_in: int, d_out: int, n_queries: int = 256, n_heads: int = 8, depth: int = 2):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(n_queries, d_out) * 0.02)
+        self.kv = nn.Linear(d_in, d_out)
+        self.blocks = nn.ModuleList(_ResamplerBlock(d_out, n_heads) for _ in range(depth))
+        self.norm = nn.LayerNorm(d_out)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_in) -> (B, n_queries, d_out)
+        kv = self.kv(x)
+        q = self.query.to(x.dtype).unsqueeze(0).expand(x.size(0), -1, -1)
+        for block in self.blocks:
+            q = block(q, kv)
+        return self.norm(q)
+
+
 class Projector(nn.Module):
     """Maps frozen-encoder features (d_in) into the LLM embedding space (d_out).
 
-    The only trainable module in the adapter. `linear` = LLaVA-1.0; `mlp` = LLaVA-1.5.
+    The only trainable module in the adapter. `linear` = LLaVA-1.0; `mlp` = LLaVA-1.5;
+    `resampler` = Perceiver connector emitting a fixed token count (laguna-vision recipe).
     """
 
     def __init__(self, d_in: int, d_out: int, kind: str = "linear"):
@@ -28,8 +66,10 @@ class Projector(nn.Module):
             self.net: nn.Module = nn.Linear(d_in, d_out)
         elif kind == "mlp":
             self.net = nn.Sequential(nn.Linear(d_in, d_out), nn.GELU(), nn.Linear(d_out, d_out))
+        elif kind == "resampler":
+            self.net = Resampler(d_in, d_out)
         else:
-            raise ValueError(f"unknown projector kind {kind!r} (use 'linear' or 'mlp')")
+            raise ValueError(f"unknown projector kind {kind!r} (use 'linear', 'mlp', or 'resampler')")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
