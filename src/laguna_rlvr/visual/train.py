@@ -127,13 +127,14 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           resume: bool = True, mixture: str = "", name_suffix: str = "",
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
           qa_eval: bool = True, description: str = "", init_projector: str = "",
-          objective: str = "recon", unfreeze: str = "") -> Path:
+          objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
+          lr_override: float | None = None) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
     print(render_plan(plan), flush=True)
     training = cfg.get("training", {})
-    lr = float(training.get("learning_rate", 1e-4))
+    lr = lr_override or float(training.get("learning_rate", 1e-4))
     max_steps = steps or int(training.get("max_steps", 1000))
     grad_accum = plan.gradient_accumulation_steps
     base = base or plan.backbone_model
@@ -144,7 +145,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         raise SystemExit("Guardrail failures for the configured backbone:\n- " + "\n- ".join(issues))
 
     enc = load_encoder(encoder, pool=pool)
-    adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze)
+    adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze, use_anchor=use_anchor)
     opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
 
     # Mixture weights: --mixture overrides the config's [mixture].weights, which overrides _DEFAULT_MIX.
@@ -369,10 +370,12 @@ def main(
     init_projector: str = typer.Option("", help="warm-start the projector from a prior best.pt (fresh optimizer)"),
     objective: str = typer.Option("recon", help="recon (transcribe) | qa (QA-SFT — forces vision use)"),
     unfreeze: str = typer.Option("", help="'' = projector only | lora = + attention LoRA on the frozen LLM"),
+    anchor: bool = typer.Option(True, "--anchor/--no-anchor", help="soft-scalar norm match on vision tokens"),
+    lr: float = typer.Option(None, help="override the config learning rate"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective, unfreeze)
+          objective, unfreeze, anchor, lr)
 
 
 if __name__ == "__main__":

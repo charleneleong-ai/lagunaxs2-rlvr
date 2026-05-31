@@ -89,12 +89,14 @@ class VisualAdapter(nn.Module):
         dtype: torch.dtype | None = None,
         device: str | None = None,
         unfreeze: str = "",
+        use_anchor: bool = True,
     ):
         super().__init__()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = dtype or (torch.bfloat16 if self.device.startswith("cuda") else torch.float32)
         self.encoder = encoder
         self.unfreeze = unfreeze
+        self.use_anchor = use_anchor  # soft-scalar norm match; off lets the projector keep per-token scale
         self.llm, self.tok = load_causal_lm(base_llm, self.device, dtype)
         self._add_image_token()  # <image> marker + subtoken-avg init, before the freeze below
         self.llm.eval()
@@ -200,10 +202,10 @@ class VisualAdapter(nn.Module):
         mean_norm = vis.flatten(0, 1).float().norm(dim=-1).mean().clamp_min(1e-6)
         return vis * (self._emb_norm_median / mean_norm).to(vis.dtype)
 
-    def _project(self, images: list, anchor: bool = True) -> torch.Tensor:
+    def _project(self, images: list, anchor: bool | None = None) -> torch.Tensor:
         feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
         vis = self.projector(feats)  # (B, Nv, D)
-        return self._anchor(vis) if anchor else vis
+        return self._anchor(vis) if (self.use_anchor if anchor is None else anchor) else vis
 
     @torch.no_grad()
     def embedding_norm_ratio(self, images: list) -> float | None:
