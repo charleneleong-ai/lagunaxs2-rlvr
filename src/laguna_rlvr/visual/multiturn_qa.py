@@ -167,6 +167,26 @@ def run_qa(run_episode, episodes: list[Episode], prefix: str = "qa") -> dict[str
             f"{prefix}/metrics/recall": recall / max(len(episodes), 1)}
 
 
+def dataset_qa_accuracy(adapter: VisualAdapter, items: list, max_new_tokens: int = _QA_GEN_TOKENS,
+                        prefix: str = "qa") -> dict[str, float]:
+    """Single-turn read accuracy over QASFTDataset val items (image, answer, corpus, question) — scores
+    the ACTUAL training distribution (incl. webcode2m visible-H1 / SyntheticOCR / the VQA suite), broken
+    down per corpus, rather than a fixed websight-heavy manifest. Substring match (replies are verbose)."""
+    from collections import defaultdict
+
+    per_corpus: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for img, answer, corpus, question in items:
+        q = question or read_question(CORPUS_KIND.get(corpus))
+        reply = adapter.chat([Turn(f"{IMAGE_TOKEN}\n{q}", [img])], max_new_tokens=max_new_tokens)[0]
+        per_corpus[corpus][0] += int(_norm(str(answer)) in _norm(reply))
+        per_corpus[corpus][1] += 1
+    hits, total = (sum(c) for c in zip(*per_corpus.values())) if per_corpus else (0, 0)
+    out = {f"{prefix}/metrics/accuracy": hits / max(total, 1)}
+    out.update({f"{prefix}/metrics/acc_{c.replace('/', '_')}": h / max(n, 1)
+                for c, (h, n) in per_corpus.items()})
+    return out
+
+
 def evaluate_multiturn_qa(adapter: VisualAdapter, n: int = 16, seed: int = 0,
                           max_new_tokens: int = _QA_GEN_TOKENS, *, source: str = "synthetic",
                           manifest: Path = _MANIFEST) -> dict[str, float]:
