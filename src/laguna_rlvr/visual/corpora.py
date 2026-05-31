@@ -129,8 +129,8 @@ def extract_needle(label: str, kind: str | None) -> str | None:
         m = _TITLE_PY.search(label)
         return m.group(1).strip() if m else None
     if kind == "html":
-        for pat in (_TITLE_HTML, _H1_HTML):
-            if m := pat.search(label):
+        for pat in (_H1_HTML, _TITLE_HTML):  # prefer the VISIBLE <h1> over the browser-tab <title>:
+            if m := pat.search(label):       # the <title> ("… :: Stackage Server") often isn't on the page
                 if text := re.sub(r"<[^>]+>", "", m.group(1)).strip():  # drop tags nested in <h1>
                     return text
     return None
@@ -155,19 +155,46 @@ class QASFTDataset(Dataset):
     ("mix", n)` (its rows carry the corpus tag needed to pick the kind/question).
     """
 
-    def __init__(self, base: Dataset):
-        self._items: list[tuple] = []
+    def __init__(self, base: Dataset, vqa_sources: list | None = None):
+        self._items: list[tuple] = []  # (image, answer, corpus, question); "" question -> per-kind default
         for i in range(len(base)):
             row = base[i]
             corpus = row[2] if len(row) > 2 else None
-            if needle := extract_needle(row[1], CORPUS_KIND.get(corpus)):
-                self._items.append((row[0], needle, corpus))
+            # SyntheticOCR's label IS the visible rendered text -> a clean, diverse, fully-visible
+            # reading needle (vs websight's guessable template / webcode2m's off-page <title>). Its
+            # default read-question ("What text is shown…") already fits, so keep it by name here
+            # rather than via CORPUS_KIND (which would mis-route its generation-metric token budget).
+            needle = (row[1].strip() or None) if corpus == "synthetic" else extract_needle(row[1], CORPUS_KIND.get(corpus))
+            if needle:
+                self._items.append((row[0], needle, corpus, ""))
+        for vqa, name in (vqa_sources or []):  # native (image, question, answer) reading supervision
+            for j in range(len(vqa)):
+                img, q, ans = vqa[j]
+                self._items.append((img, ans, f"vqa/{name}", q))  # per-source tag -> own val-loss breakdown
 
     def __len__(self) -> int:
         return len(self._items)
 
     def __getitem__(self, i: int):
         return self._items[i]
+
+
+# VQA reading sets — (image, per-example question, answer) where the answer is short visible text in
+# the image: diverse + unguessable, the supervision the title-needle corpora lack. Same shape, so
+# adding one is a registry line (a_col may be an answers list -> majority vote, or a single string).
+# a_col is a list of annotator answers (majority vote) unless paired=True (q_col/a_col are parallel
+# per-image Q&A lists -> first pair). All yield short visible-text answers = clean reading supervision.
+VQA_SPECS: dict[str, dict] = {
+    "textvqa": dict(repo="lmms-lab/textvqa", split="train", a_col="answers"),                       # scene text
+    "chartqa": dict(repo="lmms-lab/ChartQA", split="test", a_col="answer"),                          # charts
+    "docvqa": dict(repo="lmms-lab/DocVQA", config="DocVQA", split="validation", a_col="answers"),    # documents
+    "ocrvqa": dict(repo="howard-hou/OCR-VQA", q_col="questions", a_col="answers", paired=True),      # cover titles
+}
+
+
+def load_vqa(names: list[str], n: int) -> list[tuple]:
+    from laguna_rlvr.visual.hf_image_text import VQADataset
+    return [(VQADataset(n=n, **VQA_SPECS[name]), name) for name in names]
 
 
 def parse_mixture(spec: str) -> list[tuple[str, float]]:
