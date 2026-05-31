@@ -128,22 +128,26 @@ class VisualAdapter(nn.Module):
         return [p for p in self.parameters() if p.requires_grad]  # projector (+ LoRA if unfrozen)
 
     def adapter_state_dict(self) -> dict:
-        """The trainable deliverable: projector always, plus LoRA deltas when unfrozen."""
+        """The trainable deliverable: projector always, plus LoRA deltas when unfrozen. The LoRA
+        tensors are saved as raw named_parameters — peft's get/set_peft_model_state_dict route
+        through a transformers weight-conversion that is version-fragile (WeightConverter signature
+        drift). Only LoRA params require grad (base frozen), so the filter excludes the frozen
+        embedding for free — no save_embedding_layers bloat."""
         sd = {"projector": self.projector.state_dict()}
         if self.unfreeze == "lora":
-            from peft import get_peft_model_state_dict
-            # save_embedding_layers=False: the <image>-token resize trips peft's heuristic into
-            # dumping the frozen ~300M-param embedding matrix every save. It's frozen and
-            # deterministically reconstructed at load (subtoken-avg init), so saving it is pure bloat.
-            sd["lora"] = get_peft_model_state_dict(self.llm, save_embedding_layers=False)
+            sd["lora"] = {k: v.detach().cpu() for k, v in self.llm.named_parameters() if v.requires_grad}
         return sd
 
     def load_adapter_state_dict(self, sd: dict) -> None:
         sd = sd if "projector" in sd else {"projector": sd}  # accept a legacy raw projector state_dict too
         self.projector.load_state_dict(sd["projector"])
         if "lora" in sd:
-            from peft import set_peft_model_state_dict
-            set_peft_model_state_dict(self.llm, sd["lora"])
+            lora, own = sd["lora"], dict(self.llm.named_parameters())
+            if lora and next(iter(lora)) not in own:  # legacy peft-stripped keys -> re-insert ".default"
+                lora = {k.replace(".lora_A.weight", ".lora_A.default.weight")
+                         .replace(".lora_B.weight", ".lora_B.default.weight"): v for k, v in lora.items()}
+            res = self.llm.load_state_dict(lora, strict=False)
+            assert not res.unexpected_keys, f"unmatched LoRA keys: {res.unexpected_keys[:3]}"
 
     def _add_image_token(self) -> None:
         """Add an <image> placeholder token, embedding-initialized as the mean of its subtoken
