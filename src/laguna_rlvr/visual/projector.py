@@ -33,8 +33,8 @@ class _ResamplerBlock(nn.Module):
 
 class Resampler(nn.Module):
     """Perceiver-style resampler: `n_queries` learned queries cross-attend to the (variable-length)
-    encoder features and emit a *fixed* `n_queries` tokens in the LLM space. This is the laguna-vision
-    recipe's connector — it both bridges d_in->d_out and compresses AnyRes tiles (global + hi-res crops,
+    encoder features and emit a *fixed* `n_queries` tokens in the LLM space. A Perceiver/Q-Former-style
+    connector — it both bridges d_in->d_out and compresses AnyRes tiles (global + hi-res crops,
     thousands of patches) to a constant token budget, sidestepping variable-length splicing.
     """
 
@@ -44,20 +44,24 @@ class Resampler(nn.Module):
         self.kv = nn.Linear(d_in, d_out)
         self.blocks = nn.ModuleList(_ResamplerBlock(d_out, n_heads) for _ in range(depth))
         self.norm = nn.LayerNorm(d_out)
+        # learnable output projection AFTER the norm: a LayerNorm alone PINS the output norm
+        # ~sqrt(d_out), forcing reliance on the soft anchor; a trailing Linear lets the resampler
+        # learn its own output scale, so --no-anchor is viable.
+        self.out = nn.Linear(d_out, d_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_in) -> (B, n_queries, d_out)
         kv = self.kv(x)
         q = self.query.to(x.dtype).unsqueeze(0).expand(x.size(0), -1, -1)
         for block in self.blocks:
             q = block(q, kv)
-        return self.norm(q)
+        return self.out(self.norm(q))
 
 
 class Projector(nn.Module):
     """Maps frozen-encoder features (d_in) into the LLM embedding space (d_out).
 
     The only trainable module in the adapter. `linear` = LLaVA-1.0; `mlp` = LLaVA-1.5;
-    `resampler` = Perceiver connector emitting a fixed token count (laguna-vision recipe).
+    `resampler` = Perceiver connector emitting a fixed token count.
     """
 
     def __init__(self, d_in: int, d_out: int, kind: str = "linear"):

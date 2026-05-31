@@ -9,9 +9,9 @@ from laguna_rlvr.visual.projector import mean_pool
 
 _REPOS = {"glm_ocr": "zai-org/GLM-OCR", "qwen3_vl": "Qwen/Qwen3-VL-4B-Instruct",
           "qwen3_vl_8b": "Qwen/Qwen3-VL-8B-Instruct"}  # stronger general vision tower for the projector
-# SigLIP 2: same so400m backbone as laguna-vision's encoder, retrained with caption + self-distill +
-# dense losses -> better localized features (OCR/UI). Drop-in (same SiglipVisionModel path). The
-# naflex variant (native aspect-ratio / variable resolution) could later replace the AnyRes tiling.
+# SigLIP 2 so400m: retrained (vs SigLIP) with caption + self-distill + dense losses -> better
+# localized features (OCR/UI). Loads via the standard SiglipVisionModel path; the naflex variant
+# (native aspect-ratio / variable resolution) could later replace the AnyRes tiling.
 _SIGLIP_REPO = "google/siglip2-so400m-patch16-384"
 
 
