@@ -113,9 +113,9 @@ def _log_qa_samples(run, n: int = 4) -> None:
 
 
 def _save_resume(path: Path, adapter: VisualAdapter, opt, step: int, run) -> None:
-    """Atomically write resume state (projector + optimizer + step + W&B id) for crash recovery."""
+    """Atomically write resume state (trainable adapter + optimizer + step + W&B id) for crash recovery."""
     tmp = path.with_suffix(".tmp")
-    torch.save({"projector": adapter.projector.state_dict(), "opt": opt.state_dict(),
+    torch.save({"adapter": adapter.adapter_state_dict(), "opt": opt.state_dict(),
                 "step": step, "wandb_id": run.id if run else None}, tmp)
     tmp.replace(path)  # rename is atomic — a crash mid-write never corrupts the live checkpoint
 
@@ -127,7 +127,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           resume: bool = True, mixture: str = "", name_suffix: str = "",
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
           qa_eval: bool = True, description: str = "", init_projector: str = "",
-          objective: str = "recon") -> Path:
+          objective: str = "recon", unfreeze: str = "") -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -144,7 +144,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         raise SystemExit("Guardrail failures for the configured backbone:\n- " + "\n- ".join(issues))
 
     enc = load_encoder(encoder, pool=pool)
-    adapter = VisualAdapter(enc, base, projector_kind=projector_kind)
+    adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze)
     opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
 
     # Mixture weights: --mixture overrides the config's [mixture].weights, which overrides _DEFAULT_MIX.
@@ -179,12 +179,13 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     start_step, resume_id = 0, None
     if resume and resume_ckpt.exists():
         state = torch.load(resume_ckpt, map_location="cpu")  # load_state_dict places opt state on the param device
-        adapter.projector.load_state_dict(state["projector"])
+        adapter.load_adapter_state_dict(state.get("adapter") or state["projector"])  # legacy: raw projector sd
         opt.load_state_dict(state["opt"])
         start_step, resume_id = state["step"], state.get("wandb_id")
         print(f"resuming from step {start_step}/{max_steps}", flush=True)
     elif init_projector:  # warm-start the projector from a prior best.pt, fresh optimizer + step 0
-        adapter.projector.load_state_dict(torch.load(init_projector, map_location=adapter.llm.device))
+        sd = torch.load(init_projector, map_location=adapter.llm.device)
+        adapter.projector.load_state_dict(sd["projector"] if "projector" in sd else sd)
         print(f"warm-started projector from {init_projector} (fresh optimizer, step 0)", flush=True)
 
     # Offline when no WANDB_API_KEY (still produces a local trace to sync later); online otherwise.
@@ -256,7 +257,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                         # best-checkpoint + early stop on the in-mix val (this run's convergence signal)
                         if last_val < best_val - min_delta:
                             best_val, since_improve = last_val, 0
-                            torch.save(adapter.projector.state_dict(), best_ckpt)
+                            torch.save(adapter.adapter_state_dict(), best_ckpt)
                         else:
                             since_improve += 1
                         metrics = {"val/loss/total": last_val, "val/loss/best": best_val}
@@ -289,7 +290,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
             # restore the best-val projector — the deliverable + final eval reflect the val minimum,
             # not the (possibly overfit) last step.
             if best_ckpt.exists():
-                adapter.projector.load_state_dict(torch.load(best_ckpt, map_location=adapter.llm.device))
+                adapter.load_adapter_state_dict(torch.load(best_ckpt, map_location=adapter.llm.device))
             last_val = best_val
             if eval_loader is not None:  # final ranker value, recomputed on the best checkpoint
                 eval_loss, _ = _val_loss(adapter, eval_loader, objective)
@@ -307,8 +308,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                 print(f"  multiturn QA: acc {qa_acc:.3f}  recall {qa_recall:.3f}", flush=True)
                 if run:
                     run.log(qa, step=step)
-        torch.save(adapter.projector.state_dict(), ckpt)  # = best-val weights
-        print(f"saved projector -> {ckpt} (best val {best_val:.4f})", flush=True)
+        torch.save(adapter.adapter_state_dict(), ckpt)  # = best-val weights
+        print(f"saved adapter -> {ckpt} (best val {best_val:.4f})", flush=True)
         status = "KEEP"
         resume_ckpt.unlink(missing_ok=True)  # completed — don't let a fresh run resume it
     finally:
@@ -362,10 +363,11 @@ def main(
     description: str = typer.Option("", help="this run's hypothesis/intent — leads the W&B run notes"),
     init_projector: str = typer.Option("", help="warm-start the projector from a prior best.pt (fresh optimizer)"),
     objective: str = typer.Option("recon", help="recon (transcribe) | qa (QA-SFT — forces vision use)"),
+    unfreeze: str = typer.Option("", help="'' = projector only | lora = + attention LoRA on the frozen LLM"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective)
+          objective, unfreeze)
 
 
 if __name__ == "__main__":
