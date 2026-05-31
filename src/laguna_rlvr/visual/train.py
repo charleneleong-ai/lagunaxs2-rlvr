@@ -129,7 +129,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
           qa_eval: bool = True, description: str = "", init_projector: str = "",
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
-          lr_override: float | None = None, vqa: str = "") -> Path:
+          lr_override: float | None = None, vqa: str = "default") -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -154,8 +154,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         (k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
     full = build_corpus(dataset, n_train, mixture=mix_specs)
     if objective == "qa":  # QA-SFT: (image, answer, corpus, question) from needle rows + VQA reading sets
-        from laguna_rlvr.visual.corpora import QASFTDataset, load_vqa
-        full = QASFTDataset(full, vqa_sources=load_vqa(vqa.split(","), n_train) if vqa else None)
+        from laguna_rlvr.visual.corpora import DEFAULT_VQA, QASFTDataset, load_vqa
+        vqa_names = DEFAULT_VQA if vqa == "default" else [s for s in vqa.split(",") if s]
+        full = QASFTDataset(full, vqa_sources=load_vqa(vqa_names, n_train) if vqa_names else None)
     n_val = min(max(1, len(full) // 10), 256)  # 90/10 split, capped so frequent val stays cheap
     train_ds, val_ds = torch.utils.data.random_split(
         full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
@@ -378,7 +379,7 @@ def main(
     unfreeze: str = typer.Option("", help="'' = projector only | lora = + attention LoRA on the frozen LLM"),
     anchor: bool = typer.Option(True, "--anchor/--no-anchor", help="soft-scalar norm match on vision tokens"),
     lr: float = typer.Option(None, help="override the config learning rate"),
-    vqa: str = typer.Option("", help="comma-sep VQA reading sets to add to QA-SFT (e.g. textvqa)"),
+    vqa: str = typer.Option("default", help="VQA reading sets for QA-SFT: 'default'=all, comma-list, or '' = none"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
