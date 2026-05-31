@@ -192,6 +192,9 @@ VQA_SPECS: dict[str, dict] = {
 }
 
 
+DEFAULT_VQA = list(VQA_SPECS)  # all registered VQA reading sets — on by default for QA-SFT
+
+
 def load_vqa(names: list[str], n: int) -> list[tuple]:
     from laguna_rlvr.visual.hf_image_text import VQADataset
     return [(VQADataset(n=n, **VQA_SPECS[name]), name) for name in names]
