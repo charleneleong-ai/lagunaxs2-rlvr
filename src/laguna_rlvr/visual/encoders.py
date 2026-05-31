@@ -3,12 +3,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from transformers import AutoImageProcessor, AutoModelForImageTextToText
+from transformers import AutoImageProcessor, AutoModelForImageTextToText, SiglipVisionModel
 
 from laguna_rlvr.visual.projector import mean_pool
 
 _REPOS = {"glm_ocr": "zai-org/GLM-OCR", "qwen3_vl": "Qwen/Qwen3-VL-4B-Instruct",
           "qwen3_vl_8b": "Qwen/Qwen3-VL-8B-Instruct"}  # stronger general vision tower for the projector
+# SigLIP 2: same so400m backbone as laguna-vision's encoder, retrained with caption + self-distill +
+# dense losses -> better localized features (OCR/UI). Drop-in (same SiglipVisionModel path). The
+# naflex variant (native aspect-ratio / variable resolution) could later replace the AnyRes tiling.
+_SIGLIP_REPO = "google/siglip2-so400m-patch16-384"
+
+
+def _anyres_tiles(img, size: int = 384, grid: int = 2) -> list:
+    """AnyRes views: one global thumbnail + a grid*grid set of higher-detail crops. The crops give
+    the encoder the resolution to actually *resolve* small text (titles/OCR) — a single down-scaled
+    view can't. Returns 1 + grid*grid same-size tiles."""
+    img = img.convert("RGB")
+    tiles = [img.resize((size, size))]
+    big = img.resize((size * grid, size * grid))
+    for i in range(grid):
+        for j in range(grid):
+            tiles.append(big.crop((j * size, i * size, (j + 1) * size, (i + 1) * size)))
+    return tiles
 
 # Both GlmOcrForConditionalGeneration and Qwen3VLForConditionalGeneration nest the
 # frozen vision tower at `.model.visual`. Its forward is `visual(pixel_values, grid_thw=...)`
@@ -53,12 +70,43 @@ class Encoder:
         return mean_pool(x, self.pool)
 
 
+@dataclass
+class SiglipAnyResEncoder:
+    """SigLIP vision tower over AnyRes tiles. Same interface as `Encoder` (encode -> (B, N, d_enc),
+    d_enc, pool) so it drops into VisualAdapter unchanged. Each image -> (1+grid^2) tiles ->
+    fixed N = tiles * patches per image, meant to feed a `resampler` projector that compresses to a
+    constant token budget."""
+    tower: torch.nn.Module
+    processor: object
+    d_enc: int
+    pool: int = 1
+    grid: int = 2
+
+    @torch.no_grad()
+    def encode(self, images: list) -> torch.Tensor:
+        device = next(self.tower.parameters()).device
+        dtype = next(self.tower.parameters()).dtype
+        feats = []
+        for img in images:
+            tiles = _anyres_tiles(img, grid=self.grid)
+            px = self.processor(images=tiles, return_tensors="pt")["pixel_values"].to(device, dtype)
+            out = self.tower(px).last_hidden_state  # (tiles, patches, d_enc)
+            feats.append(out.reshape(-1, out.shape[-1]))  # (tiles*patches, d_enc)
+        return mean_pool(torch.stack(feats, dim=0), self.pool)  # (B, tiles*patches, d_enc)
+
+
 def load_encoder(name: str, pool: int = 1, dtype: torch.dtype | None = None,
-                 device: str | None = None) -> Encoder:
-    if name not in _REPOS:
-        raise ValueError(f"unknown encoder {name!r}; choose from {list(_REPOS)}")
+                 device: str | None = None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     dtype = dtype or (torch.bfloat16 if device.startswith("cuda") else torch.float32)
+    if name == "siglip":
+        tower = SiglipVisionModel.from_pretrained(_SIGLIP_REPO, dtype=dtype).eval().to(device)
+        for p in tower.parameters():
+            p.requires_grad_(False)
+        processor = AutoImageProcessor.from_pretrained(_SIGLIP_REPO)
+        return SiglipAnyResEncoder(tower=tower, processor=processor, d_enc=tower.config.hidden_size, pool=pool)
+    if name not in _REPOS:
+        raise ValueError(f"unknown encoder {name!r}; choose from {list(_REPOS) + ['siglip']}")
     repo = _REPOS[name]
     full = AutoModelForImageTextToText.from_pretrained(repo, dtype=dtype)
     tower = _resolve(full, _TOWER_PATH).eval().to(device)
