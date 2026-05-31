@@ -26,7 +26,8 @@ from laguna_rlvr.visual.data import render_text
 from laguna_rlvr.visual.model import IMAGE_TOKEN, Turn, VisualAdapter
 
 _MANIFEST = Path("data/multiturn_qa.jsonl")
-_QA_CORPORA = ["chartmimic", "design2code", "websight"]  # needle-bearing kinds (python / html)
+_QA_CORPORA = ["webcode2m", "design2code", "websight"]  # html needle-bearing (chartmimic label is a
+#                                                         filename, not code -> no extractable needle)
 _PER_CORPUS = 64   # rows scanned per corpus when building the manifest
 _RECALL_Q = "What was shown in the first image? Answer with its exact title or text."
 

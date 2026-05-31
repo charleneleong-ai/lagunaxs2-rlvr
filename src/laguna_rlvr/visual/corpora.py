@@ -92,8 +92,8 @@ class _Mixture(Dataset):
 # OCR target the projector — the only trainable bridge — is free to repurpose those dims for the code
 # objective and erode readout (multi-turn QA floored at 0 on the code-only mix, 2026-05). kind=None,
 # so it's the corpus WER/CER scores against (vs the meaningless code WER it scored before).
-_DEFAULT_MIX = [("websight", 0.45), ("webcode2m", 0.25), ("chartmimic", 0.1),
-                ("swebench_mm", 0.1), ("synthetic", 0.1)]
+_DEFAULT_MIX = [("websight", 0.45), ("webcode2m", 0.25),  # chartmimic dropped: label is a filename,
+                ("swebench_mm", 0.1), ("synthetic", 0.2)]  # not code -> no extractable title needle
 
 REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "synthetic": _synthetic,
