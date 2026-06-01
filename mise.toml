@@ -13,12 +13,12 @@ run = [
 description = "Verify the toolchain is ready"
 run = [
   "uv --version",
-  "prime --version",
+  "uv run prime --version",
 ]
 
 [tasks.login]
 description = "Authenticate the Prime CLI (interactive — opens browser)"
-run = "prime login"
+run = "uv run prime login"
 
 [tasks.test]
 description = "Run the test suite"
@@ -45,8 +45,23 @@ description = "One self-evolving RLVR turn: synthesize -> probe base rate -> ran
 run = "bash scripts/rlvr_loop.sh"
 
 [tasks.train]
-description = "Launch the free hosted Laguna RL run from the toml config"
-run = "prime train configs/rl/laguna-xs2.toml"
+description = "Launch the free hosted Laguna RL run from the toml config (code_smoke)"
+run = "uv run prime train configs/rl/laguna-xs2.toml"
+
+[tasks.submit-curriculum]
+description = "Push read+frontend envs + submit the hosted GSPO curriculum (free Laguna slot)"
+run = "uv run bash scripts/submit_training.sh configs/rl/laguna-curriculum.toml environments/ocr_tool environments/frontend_design"
+
+[tasks.eval-baseline]
+description = "Baseline eval: base Laguna on the read + frontend envs (the before-numbers for lift)"
+run = [
+  "uv run prime eval run chaleong/ocr-tool -m poolside/laguna-xs.2",
+  "uv run prime eval run chaleong/frontend-design -m poolside/laguna-xs.2",
+]
+
+[tasks.monitor]
+description = "Monitor a hosted run: metrics + reward/advantage distributions + rollouts. Args after --: <run-id>"
+run = 'uv run prime train metrics {{arg(name="run")}} && uv run prime train distributions {{arg(name="run")}} && uv run prime train rollouts {{arg(name="run")}}'
 
 [tasks.mm-adapter-plan]
 description = "Dry-run the A100 40GB generalized adapter scaffold"

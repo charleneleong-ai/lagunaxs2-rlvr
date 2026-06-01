@@ -25,6 +25,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "codebleu>=0.7.0",
     "tree-sitter-python==0.21.0",
+    "prime>=0.6.10",  # Prime Intellect CLI + SDK — `prime env push` / `prime train` (scripts/submit_training.sh)
 ]
 
 [dependency-groups]

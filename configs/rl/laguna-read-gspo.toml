@@ -1,0 +1,24 @@
+# GSPO-style hosted RL of Laguna XS.2 on the OCR-tool READ env (image -> `OCR: <id>` tool -> read ->
+# answer). The verifiable read reward is the metric the projector SFT can't crack (the CE confabulation
+# wall, baseline OCRBench 0.000); here the BASE learns to read via the tool. `rollouts_per_example` > 1
+# gives within-task reward variance -> group-relative updates (GSPO's mechanism), run on Prime's infra
+# through `input_ids` (no inputs_embeds wrapper needed, unlike the local visual-adapter GSPOTrainer).
+#
+#   1) prime env push --path environments/ocr_tool      # publish to chaleong/ocr-tool
+#   2) prime train configs/rl/laguna-read-gspo.toml      # hosted run (<=1 concurrent, batch<=128)
+#   eval lift: prime eval run chaleong/ocr-tool -m poolside/laguna-xs.2   (before vs after)
+model = "poolside/Laguna-XS.2"
+
+max_steps = 50
+batch_size = 64            # rollouts per step (hackathon cap: 128) -> 8 distinct examples/step at G=8
+rollouts_per_example = 8   # G=8 within-task reward variance — the group-relative (GSPO) signal
+learning_rate = 1e-5       # below code_smoke's 1e-4: the read reward is sparser, so smaller steps
+
+[sampling]
+max_tokens = 1024
+enable_thinking = false    # non-thinking for agentic tool-use training (hackathon best practice)
+
+[[env]]
+id = "chaleong/ocr-tool"
+# OCRToolEnv defaults (max_turns=4, efficiency_weight=0.1). Retune once confirmed, e.g.:
+# args = { max_turns = 4, efficiency_weight = 0.1 }

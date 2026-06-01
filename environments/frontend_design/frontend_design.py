@@ -8,6 +8,7 @@ and $0 (no browser, no sandbox). This is the design -> frontend-code half of the
 """
 from __future__ import annotations
 
+import random
 import re
 
 import verifiers as vf
@@ -72,6 +73,94 @@ _BUILTIN_DESIGNS = [
 
 _DESIGN_RE = re.compile(r"DESIGN:\s*(\S+)", re.I)
 
+# Synthetic-mockup vocabulary. Each primitive picks values from these pools so every generated
+# design gets a distinct multi-requirement checklist (partial credit -> reward variance).
+_HEADINGS = ["Dashboard", "Welcome Aboard", "Your Profile", "Order Summary", "Settings",
+             "Latest News", "Project Overview", "Account Details", "Get In Touch", "Daily Report"]
+_BUTTONS = ["Save", "Continue", "Submit", "Download", "Confirm", "Add Item", "Log Out", "Apply", "Next", "Refresh"]
+_LINK_TEXTS = ["Learn More", "View Docs", "Read Blog", "See Pricing", "Browse Gallery", "Open Help"]
+_URLS = ["https://example.com/docs", "https://acme.io/pricing", "https://site.dev/blog",
+         "https://app.example.com/help", "https://example.org/gallery"]
+_ALTS = ["company logo", "product photo", "user avatar", "hero banner", "chart preview"]
+_PLACEHOLDERS = ["Enter your name", "Search…", "Your message", "Email address", "Phone number"]
+_COLORS = ["#1e90ff", "#2ecc71", "#e74c3c", "#9b59b6", "#f39c12", "teal", "indigo"]
+_PARAS = ["Manage everything from one place.", "Built for teams who move fast.",
+          "Simple, transparent and reliable.", "Track your progress over time."]
+
+
+def _esc(text: str) -> str:
+    return re.escape(text.lower())
+
+
+# Each builder: rng -> (requirement_label, regex_pattern, satisfying_html_fragment).
+def _heading(rng: random.Random) -> tuple[str, str, str]:
+    txt = rng.choice(_HEADINGS)
+    return (f"a top heading reading '{txt}'", rf"<h1[^>]*>\s*{_esc(txt)}", f"<h1>{txt}</h1>")
+
+
+def _button(rng: random.Random) -> tuple[str, str, str]:
+    txt = rng.choice(_BUTTONS)
+    return (f"a button labeled '{txt}'", rf"<button[^>]*>\s*{_esc(txt)}", f"<button>{txt}</button>")
+
+
+def _list_items(rng: random.Random) -> tuple[str, str, str]:
+    k = rng.randint(2, 5)
+    items = "".join("<li>row</li>" for _ in range(k))
+    return (f"a list of exactly {k} items", rf"(?:<li[^>]*>.*?</li>\s*){{{k}}}", f"<ul>{items}</ul>")
+
+
+def _link(rng: random.Random) -> tuple[str, str, str]:
+    txt, url = rng.choice(_LINK_TEXTS), rng.choice(_URLS)
+    return (f"a '{txt}' link to {url}",
+            rf"<a[^>]*href=[\"']?{_esc(url)}[^>]*>[^<]*{_esc(txt)}",
+            f'<a href="{url}">{txt}</a>')
+
+
+def _image(rng: random.Random) -> tuple[str, str, str]:
+    alt = rng.choice(_ALTS)
+    return (f"an image with alt text '{alt}'", rf"<img[^>]*alt=[\"']?{_esc(alt)}",
+            f'<img src="x.png" alt="{alt}">')
+
+
+def _input(rng: random.Random) -> tuple[str, str, str]:
+    ph = rng.choice(_PLACEHOLDERS)
+    return (f"an input with placeholder '{ph}'", rf"<input[^>]*placeholder=[\"']?{_esc(ph)}",
+            f'<input placeholder="{ph}">')
+
+
+def _section(rng: random.Random) -> tuple[str, str, str]:
+    color = rng.choice(_COLORS)
+    return (f"a section with {color} background", rf"background[^;\"']*:[^;\"']*{_esc(color)}",
+            f'<section style="background: {color}">block</section>')
+
+
+def _paragraph(rng: random.Random) -> tuple[str, str, str]:
+    txt = rng.choice(_PARAS)
+    return (f"a paragraph reading '{txt}'", rf"<p[^>]*>\s*{_esc(txt)}", f"<p>{txt}</p>")
+
+
+_PRIMITIVES = [_heading, _button, _list_items, _link, _image, _input, _section, _paragraph]
+
+
+def _synth_designs(n: int, seed: int = 0, *, with_html: bool = False) -> list[tuple]:
+    """Deterministically generate n mockups in the env's (mockup_id, design_spec, [(label, regex)]) shape.
+
+    With with_html=True, each design gains a trailing element: a single HTML document that satisfies every
+    one of its requirements (a satisfiability witness for the regex checklist) — used only by tests.
+    """
+    rng = random.Random(seed)
+    designs = []
+    for i in range(n):
+        builders = rng.sample(_PRIMITIVES, rng.randint(3, 5))
+        reqs = [b(rng) for b in builders]
+        labels = [r[0] for r in reqs]
+        spec = "Mockup: " + "; ".join(labels) + "."
+        design = (f"design_{i}", spec, [(label, pat) for label, pat, _ in reqs])
+        if with_html:
+            design += ("<!doctype html><html><body>" + "".join(html for _, _, html in reqs) + "</body></html>",)
+        designs.append(design)
+    return designs
+
 
 def score_markup(html: str, labels: list[str], patterns: list[str]) -> list[str]:
     """Return the labels of requirements NOT satisfied by the markup (case-insensitive regex search)."""
@@ -93,7 +182,9 @@ class FrontendDesignEnv(vf.MultiTurnEnv):
                  "info": {"mockup_id": mid, "spec": spec,
                           "labels": [r[0] for r in reqs], "patterns": [r[1] for r in reqs]}}
                 for mid, spec, reqs in designs]
-        super().__init__(eval_dataset=Dataset.from_list(rows),
+        ds = Dataset.from_list(rows)
+        # `dataset` (not just `eval_dataset`) — hosted RL's buffer calls env.get_dataset() on `dataset`.
+        super().__init__(dataset=ds, eval_dataset=ds,
                          rubric=vf.Rubric(funcs=[self._reward, self._success], weights=[1.0, 0.0]),
                          max_turns=max_turns, message_type="chat", **kwargs)
 
@@ -135,5 +226,9 @@ class FrontendDesignEnv(vf.MultiTurnEnv):
         return [{"role": "user", "content": "Read the design with `DESIGN: <mockup_id>`, then send an ```html block."}]
 
 
-def load_environment(max_turns: int = 5, efficiency_weight: float = 0.1, **kwargs) -> vf.Environment:
-    return FrontendDesignEnv(_BUILTIN_DESIGNS, max_turns=max_turns, efficiency_weight=efficiency_weight)
+def load_environment(n_designs: int = 32, seed: int = 0, max_turns: int = 5,
+                     efficiency_weight: float = 0.1, **kwargs) -> vf.Environment:
+    # Curated mockups seed the pool; synthetic ones pad it so hosted RL has enough groups to fill the
+    # buffer (7 designs starved batch_size=64 / rollouts_per_example=8).
+    designs = _BUILTIN_DESIGNS + _synth_designs(n_designs, seed)
+    return FrontendDesignEnv(designs, max_turns=max_turns, efficiency_weight=efficiency_weight)
