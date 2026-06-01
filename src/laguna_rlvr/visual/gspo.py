@@ -73,6 +73,7 @@ class GSPOTrainer:
         # `multinomial` device-side assert): clamp the log-ratio before exp() so `s` can't overflow to
         # inf, clip the grad norm so one batch can't take a giant step, and skip non-finite updates.
         self.max_grad_norm, self.max_logratio = max_grad_norm, max_logratio
+        self.last_rollouts: list = []  # most recent step's (image, question, completions, rewards)
         # gspo (default): length-normalized SEQUENCE-level importance ratio — stable on the 33B MoE base
         # (GRPO's per-token ratios explode when expert routing differs old-vs-new) and matches our
         # sequence-level verifiable rewards. grpo: token-level ratio (kept for comparison).
@@ -107,11 +108,13 @@ class GSPOTrainer:
         """`items`: (image, question, needle). Accumulate a GRPO loss over the batch; one optimizer step."""
         self.opt.zero_grad()
         tot_loss = tot_rew = 0.0
+        self.last_rollouts = []  # (image, question, completions, rewards) — for W&B sample logging
         for image, question, needle in items:
             prompt_e = self._prompt_embeds(image, question)
             seqs, old_logp = self._sample_group(prompt_e)  # no grad
             texts = [self.a.tok.decode(s, skip_special_tokens=True) for s in seqs]
             rew = torch.tensor([self.reward_fn(needle, t) for t in texts], device=seqs.device)
+            self.last_rollouts.append((image, question, texts, [round(x, 3) for x in rew.tolist()]))
             adv = (rew - rew.mean()) / (rew.std() + 1e-4)  # group-relative advantage (G,)
             cur_logp = self._logprobs(prompt_e, seqs)  # (G, gen_len) WITH grad
             mask = (seqs != self.pad).float()
@@ -178,6 +181,12 @@ def main(
             print(f"  [eval] step {step}: qa_acc {qa:.3f}  (best {best:.3f})", flush=True)
             if run is not None:
                 run.log({"qa/metrics/accuracy": qa, "qa/metrics/best": best}, step=step)
+                if trainer.last_rollouts:  # image/text rollout samples + their rewards (group variance)
+                    tbl = wandb.Table(columns=["image", "question", "rollout", "reward"])
+                    for image, question, texts, rews in trainer.last_rollouts:
+                        for t, rw in zip(texts, rews):
+                            tbl.add_data(wandb.Image(image), question[:200], t[:200], rw)
+                    run.log({"qa/rollouts": tbl}, step=step)
             if qa >= best:
                 torch.save(a.adapter_state_dict(), out_dir / "best.pt")
     print(f"done. best qa_acc {best:.3f} -> {out_dir}/best.pt", flush=True)
