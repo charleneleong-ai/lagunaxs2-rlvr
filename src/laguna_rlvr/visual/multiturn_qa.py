@@ -51,6 +51,18 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", str(s).lower()).strip()
 
 
+def token_f1(a: set[str], b: set[str]) -> float:
+    """Token-set F1: 1.0 if identical (or both empty), 0.0 if disjoint or exactly one is empty. The
+    shared read-overlap primitive — reused by the multimodal benchmark scorers (design2code, mmdu)."""
+    if not a or not b:
+        return float(not a and not b)
+    inter = len(a & b)
+    if not inter:
+        return 0.0
+    p, r = inter / len(a), inter / len(b)
+    return 2 * p * r / (p + r)
+
+
 def _match(needle: str, reply: str) -> bool:
     """Loosened read match: BIDIRECTIONAL substring. The reply contains the needle ('University of
     California, Berkeley' for 'university of california'), OR the reply is a substantial substring of

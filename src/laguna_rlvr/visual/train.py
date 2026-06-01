@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
+from laguna_rlvr.visual.benchmarks import run_benchmarks
 from laguna_rlvr.visual.corpora import CHOICES, build_corpus, parse_mixture
 from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.encoders import load_encoder
@@ -141,7 +142,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
           qa_eval: bool = True, description: str = "", init_projector: str = "",
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
-          lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0) -> Path:
+          lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0,
+          benchmarks: str = "", bench_n: int = 64) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -357,6 +359,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                       "(cross-turn memory)", flush=True)
                 if run:
                     run.log(qa, step=step)
+            if benchmarks:  # external public-benchmark suite (read/vqa/visual-code/ground/converse)
+                run_benchmarks(adapter, [b for b in benchmarks.split(",") if b], n=bench_n,
+                               run=run, step=step)
         torch.save(adapter.adapter_state_dict(), ckpt)  # = best-val weights
         print(f"saved adapter -> {ckpt} (best val {best_val:.4f})", flush=True)
         status = "KEEP"
@@ -417,10 +422,13 @@ def main(
     lr: float = typer.Option(None, help="override the config learning rate"),
     vqa: str = typer.Option("default", help="VQA reading sets for QA-SFT: 'default'=all, comma-list, or '' = none"),
     norm_penalty: float = typer.Option(0.0, help="soft cap on projected-token scale (--no-anchor ballooning)"),
+    benchmarks: str = typer.Option("", help="comma-list external benchmarks for the final probe: "
+                                            "ocrbench,mmmu,mathvista,design2code,screenspot_v2,mmdu"),
+    bench_n: int = typer.Option(64, help="held-out examples per external benchmark"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective, unfreeze, anchor, lr, vqa, norm_penalty)
+          objective, unfreeze, anchor, lr, vqa, norm_penalty, benchmarks, bench_n)
 
 
 if __name__ == "__main__":

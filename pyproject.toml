@@ -28,6 +28,7 @@ dependencies = [
     "tiktoken>=0.13.0",
     "sentencepiece>=0.2.1",
     "peft>=0.19.1",
+    "playwright>=1.49",  # headless render for the Design2Code benchmark (run `playwright install chromium`)
 ]
 
 [dependency-groups]
