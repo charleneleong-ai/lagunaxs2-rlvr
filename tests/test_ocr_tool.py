@@ -62,3 +62,24 @@ class TestEnv:
         asyncio.run(env.setup_state(state))
         asyncio.run(env.env_response([{"role": "assistant", "content": "ANSWER: 42"}], state))
         assert state["done"] and not state["solved"]
+
+
+class TestReadScore:
+    """Graded read credit: exact -> 1.0, partial overlap in (0, 0.5], disjoint -> 0.0 (no binary cliff)."""
+
+    @pytest.mark.parametrize("gold, guess, lo, hi", [
+        ("jane@clinic.org", "jane@clinic.org", 1.0, 1.0),     # exact match
+        ("MX-88231", "the id is MX-88231", 1.0, 1.0),         # substring -> match
+        ("jane@clinic.org", "jane@clinic.com", 0.01, 0.5),    # near miss -> partial, below exact
+        ("MX-88231", "ZZ-00000", 0.0, 0.0),                   # disjoint -> 0
+    ])
+    def test_graded(self, gold, guess, lo, hi):
+        assert lo <= ocr_tool._read_score(gold, guess) <= hi
+
+    def test_partial_answer_gets_nonzero_reward(self):
+        env = ocr_tool.load_environment()
+        state = {"info": {"image_id": "c.png", "text": "Email: jane@clinic.org", "answer": "jane@clinic.org"},
+                 "turn": 1}
+        asyncio.run(env.setup_state(state))
+        asyncio.run(env.env_response([{"role": "assistant", "content": "ANSWER: jane@clinic.com"}], state))
+        assert not state["solved"] and 0.0 < env._reward(state) < 1.0  # graded, not a 0 cliff

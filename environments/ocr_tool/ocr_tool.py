@@ -18,7 +18,7 @@ import verifiers as vf
 from datasets import Dataset
 
 from laguna_rlvr.code_exec import message_text   # vendor before any Hub push
-from laguna_rlvr.rewards import RolloutState, binary, shaped
+from laguna_rlvr.rewards import RolloutState, binary, efficiency_bonus
 
 # (image_id, document_text, question, answer) — multi-field docs so answering needs parsing, not echo.
 _BUILTIN_DOCS = [
@@ -67,6 +67,20 @@ def _match(gold: str, guess: str) -> bool:
         return g in h   # tolerate surrounding words ("the email is jane@clinic.org")
 
 
+def _words(s: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", s.lower()))
+
+
+def _read_score(gold: str, guess: str) -> float:
+    """Graded read credit: 1.0 on a match (exact / float / substring), else token-F1 partial credit
+    (x0.5, always below an exact read). A near-miss read still earns gradient, so groups aren't all-zero
+    at cold-start — the binary-reward trap that needs G to be large to escape (the local GSPO lesson)."""
+    if _match(gold, guess):
+        return 1.0
+    g, h = _words(gold), _words(guess)
+    return 0.5 * (2 * len(g & h) / (len(g) + len(h))) if g and h else 0.0
+
+
 def ocr(image_id: str, images: dict[str, str]) -> str:
     """Mock OCR backend: return the image's known text (perfect extraction; stands in for GLM-OCR).
     A real backend (GLM-OCR, tesseract) keeps the same (image_id, store) seam, rendering/extracting instead."""
@@ -88,7 +102,9 @@ class OCRToolEnv(vf.MultiTurnEnv):
                             max_turns=self.max_turns, succeeded=solved)
 
     def _reward(self, state, **_) -> float:
-        return shaped(self._rs(state), self._eff_w)
+        # graded read credit (exact 1.0 / partial token-overlap) + an efficiency nudge paid only on a
+        # full solve — dense enough that cold-start groups have reward variance, not all-zeros.
+        return state.get("read_score", 0.0) + self._eff_w * efficiency_bonus(self._rs(state))
 
     def _success(self, state, **_) -> float:
         return binary(self._rs(state))
@@ -108,6 +124,7 @@ class OCRToolEnv(vf.MultiTurnEnv):
         info = state["info"]
         if (ans := _ANSWER_RE.search(text)):
             state["solved"] = _match(info["answer"], ans.group(1))
+            state["read_score"] = _read_score(info["answer"], ans.group(1))  # graded, not just binary
             state["done"] = True
             return [{"role": "user", "content": "✅ Correct." if state["solved"] else "❌ Incorrect."}]
         if (call := _OCR_RE.search(text)):
