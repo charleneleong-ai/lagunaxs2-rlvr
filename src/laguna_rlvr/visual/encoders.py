@@ -3,16 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from transformers import AutoImageProcessor, AutoModelForImageTextToText, SiglipVisionModel
+from transformers import (AutoImageProcessor, AutoModelForImageTextToText, Siglip2VisionModel,
+                          SiglipVisionModel)
 
 from laguna_rlvr.visual.projector import mean_pool
 
 _REPOS = {"glm_ocr": "zai-org/GLM-OCR", "qwen3_vl": "Qwen/Qwen3-VL-4B-Instruct",
           "qwen3_vl_8b": "Qwen/Qwen3-VL-8B-Instruct"}  # stronger general vision tower for the projector
 # SigLIP 2 so400m: retrained (vs SigLIP) with caption + self-distill + dense losses -> better
-# localized features (OCR/UI). Loads via the standard SiglipVisionModel path; the naflex variant
-# (native aspect-ratio / variable resolution) could later replace the AnyRes tiling.
+# localized features (OCR/UI). 384 = fixed-square + AnyRes tiling; naflex = native aspect-ratio /
+# variable resolution (no tiling -> the encoder ingests the page at its own shape).
 _SIGLIP_REPO = "google/siglip2-so400m-patch16-384"
+_SIGLIP_NAFLEX_REPO = "google/siglip2-so400m-patch16-naflex"
 
 
 def _anyres_tiles(img, size: int = 384, grid: int = 2) -> list:
@@ -95,10 +97,40 @@ class SiglipAnyResEncoder:
         return mean_pool(torch.stack(feats, dim=0), self.pool)  # (B, tiles*patches, d_enc)
 
 
+@dataclass
+class Siglip2NaflexEncoder:
+    """SigLIP2-NaFlex tower: native aspect-ratio / variable-resolution patches (no AnyRes tiling). The
+    processor emits padded `pixel_values` + a `pixel_attention_mask` + `spatial_shapes`; we drop the
+    padded patches so the resampler sees only real ones. Same (encode -> (B, N, d_enc)) interface."""
+    tower: torch.nn.Module
+    processor: object
+    d_enc: int
+    pool: int = 1
+
+    @torch.no_grad()
+    def encode(self, images: list) -> torch.Tensor:
+        device = next(self.tower.parameters()).device
+        dtype = next(self.tower.parameters()).dtype
+        feats = []
+        for img in images:
+            b = self.processor(images=[img.convert("RGB")], return_tensors="pt").to(device)
+            out = self.tower(pixel_values=b["pixel_values"].to(dtype),
+                             pixel_attention_mask=b["pixel_attention_mask"], spatial_shapes=b["spatial_shapes"])
+            feats.append(out.last_hidden_state[0][b["pixel_attention_mask"][0].bool()])  # drop padded patches
+        # variable N per image -> only stackable at micro_batch=1 (our setting); the resampler folds N away.
+        return mean_pool(torch.stack(feats, dim=0), self.pool)
+
+
 def load_encoder(name: str, pool: int = 1, dtype: torch.dtype | None = None,
                  device: str | None = None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     dtype = dtype or (torch.bfloat16 if device.startswith("cuda") else torch.float32)
+    if name == "siglip_naflex":
+        tower = Siglip2VisionModel.from_pretrained(_SIGLIP_NAFLEX_REPO, dtype=dtype).eval().to(device)
+        for p in tower.parameters():
+            p.requires_grad_(False)
+        return Siglip2NaflexEncoder(tower=tower, processor=AutoImageProcessor.from_pretrained(_SIGLIP_NAFLEX_REPO),
+                                    d_enc=tower.config.hidden_size, pool=pool)
     if name == "siglip":
         tower = SiglipVisionModel.from_pretrained(_SIGLIP_REPO, dtype=dtype).eval().to(device)
         for p in tower.parameters():
@@ -106,7 +138,7 @@ def load_encoder(name: str, pool: int = 1, dtype: torch.dtype | None = None,
         processor = AutoImageProcessor.from_pretrained(_SIGLIP_REPO)
         return SiglipAnyResEncoder(tower=tower, processor=processor, d_enc=tower.config.hidden_size, pool=pool)
     if name not in _REPOS:
-        raise ValueError(f"unknown encoder {name!r}; choose from {list(_REPOS) + ['siglip']}")
+        raise ValueError(f"unknown encoder {name!r}; choose from {list(_REPOS) + ['siglip', 'siglip_naflex']}")
     repo = _REPOS[name]
     full = AutoModelForImageTextToText.from_pretrained(repo, dtype=dtype)
     tower = _resolve(full, _TOWER_PATH).eval().to(device)
