@@ -140,6 +140,8 @@ def main(
     encoder: str = "siglip", base: str = "poolside/Laguna-XS.2", projector: str = "resampler",
     unfreeze: str = "lora", reward: str = "read", mode: str = "gspo",
     steps: int = 1500, group_size: int = 8, batch: int = 2, lr: float = 1e-6,
+    temperature: float = typer.Option(1.0, help="rollout sampling temperature; lower keeps rollouts "
+                                      "near the greedy reader so sparse reads still earn reward variance"),
     n_train: int = 512, eval_every: int = 100, seed: int = 0, out: str = "results/visual",
     name_suffix: str = "gspo", wandb_tracking: bool = typer.Option(True, "--wandb/--no-wandb",
                                                                    help="log to Weights & Biases"),
@@ -163,7 +165,8 @@ def main(
                      config={"mode": mode, "reward": reward, "group_size": group_size, "batch": batch,
                              "lr": lr, "steps": steps, "encoder": encoder, "projector": projector,
                              "unfreeze": unfreeze, "init_ckpt": init_ckpt}) if wandb_tracking else None
-    trainer = GSPOTrainer(a, reward_fn=REWARDS[reward], group_size=group_size, lr=lr, mode=mode)
+    trainer = GSPOTrainer(a, reward_fn=REWARDS[reward], group_size=group_size, lr=lr, mode=mode,
+                          temperature=temperature)
     out_dir = Path(out) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     best = -1.0
