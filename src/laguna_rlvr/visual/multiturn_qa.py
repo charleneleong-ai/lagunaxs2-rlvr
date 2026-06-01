@@ -52,18 +52,16 @@ def _norm(s: str) -> str:
 
 
 def _match(needle: str, reply: str) -> bool:
-    """Loosened read match: exact substring OR token-F1 >= 0.5. The strict substring undercounts real
-    reads the model phrases differently or partially ('Section 4.2 Results' for 'Section 4.2 Results
-    6890', 'University of California' for '…California, Berkeley'); token-F1 credits those without
-    rewarding disjoint hallucinations ('nokia' vs 'samsung' -> 0)."""
+    """Loosened read match: BIDIRECTIONAL substring. The reply contains the needle ('University of
+    California, Berkeley' for 'university of california'), OR the reply is a substantial substring of
+    the needle ('Section 4.2 Results' for 'Section 4.2 Results 6890' = a partial read). Contiguity is
+    the point: token-F1 over-credited shared function words ('University of Minnesota' scored a HIT for
+    'University of California' via 'university of'); requiring a contiguous match fixes that while still
+    crediting partial/verbose reads and rejecting disjoint hallucinations ('nokia' vs 'samsung')."""
     n, r = _norm(needle), _norm(reply)
-    if n and n in r:
-        return True
-    nt, rt = set(n.split()), set(r.split())
-    if not nt or not rt:
+    if not n or not r:
         return False
-    inter = len(nt & rt)
-    return (2 * inter / (len(nt) + len(rt))) >= 0.5
+    return n in r or (len(r) >= 4 and r in n)
 
 
 # ── episodes + manifest ──────────────────────────────────────────────────────────────────────────
