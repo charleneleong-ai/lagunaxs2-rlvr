@@ -4,11 +4,22 @@ from laguna_rlvr.visual.mmmu import (
     _free_match,
     _match_choice,
     _norm_answer,
+    _option_lines,
     _parse_choice,
     _parse_options,
     mathvista_eval,
     mmmu_eval,
 )
+
+
+def test_option_lines_handles_more_than_seven_options():
+    # MMMU has questions with >7 options; _LETTERS must not overflow (the n=64 IndexError)
+    lines = _option_lines([f"opt{i}" for i in range(9)])
+    assert "\nA. opt0" in lines and "\nI. opt8" in lines  # letters extend past G to I
+
+
+def test_parse_choice_supports_late_letters():
+    assert _parse_choice("the answer is I", 9) == "I"
 
 
 class _FakeAdapter:

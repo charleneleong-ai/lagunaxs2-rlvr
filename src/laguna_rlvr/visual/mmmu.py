@@ -31,7 +31,7 @@ from laguna_rlvr.visual.model import IMAGE_TOKEN, Turn, VisualAdapter
 # (one stream), but MMMU/MMMU is per-subject, so we iterate these and cap to `n` total.
 _MMMU_SUBJECTS = ["Accounting", "Art", "Biology", "Computer_Science", "Economics", "History",
                   "Math", "Physics", "Psychology"]
-_LETTERS = "ABCDEFG"
+_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"  # full alphabet: MMMU has questions with >7 options
 
 
 # ── shared parsing ──────────────────────────────────────────────────────────────────────────────────
