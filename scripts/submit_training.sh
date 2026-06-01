@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Submit the free hosted Laguna XS.2 RL run on the code_smoke (MBPP) env.
+# Submit a free hosted Laguna XS.2 RL run on a verifiers env.
 #
-#   bash scripts/submit_training.sh
+#   bash scripts/submit_training.sh [ENV_DIR] [CONFIG]
+#   # default:  environments/code_smoke  configs/rl/laguna-xs2.toml       (MBPP code-repair)
+#   # read RL:  bash scripts/submit_training.sh environments/ocr_tool configs/rl/laguna-read-gspo.toml
 #
 # Vendors the two pure laguna_rlvr helpers into the env dir so the hosted container is
-# self-contained (no extra install), pushes the env to chaleong/code-smoke, then launches
-# `prime train`. The vendored copy is gitignored and removed on exit — committed source stays DRY.
+# self-contained (no extra install), pushes the env, then launches `prime train`. The vendored copy
+# is gitignored and removed on exit — committed source stays DRY.
 #
 # Uses the team's single free concurrent Laguna run slot. `prime train` will prompt to confirm.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ENV_DIR="environments/code_smoke"
+ENV_DIR="${1:-environments/code_smoke}"
+CONFIG="${2:-configs/rl/laguna-xs2.toml}"
 VENDOR="$ENV_DIR/laguna_rlvr"
-CONFIG="configs/rl/laguna-xs2.toml"
 
 cleanup() { rm -rf "$VENDOR"; }
 trap cleanup EXIT
@@ -30,11 +32,11 @@ import laguna_rlvr.code_exec, laguna_rlvr.rewards  # noqa: F401
 print('   vendored laguna_rlvr imports OK')
 " )
 
-echo ">> Pushing env to the Hub (chaleong/code-smoke)"
+echo ">> Pushing env to the Hub from $ENV_DIR"
 prime env push --path "$ENV_DIR"
 
 echo ">> Launching free hosted Laguna RL run from $CONFIG"
 prime train "$CONFIG"
 
 echo ">> Submitted. Track with: prime train list   (or the dashboard)."
-echo "   Measure lift: prime eval run chaleong/code-smoke -m poolside/laguna-xs.2  (before vs after)"
+echo "   Measure lift: prime eval run <env-id> -m poolside/laguna-xs.2  (before vs after; see $CONFIG)"
