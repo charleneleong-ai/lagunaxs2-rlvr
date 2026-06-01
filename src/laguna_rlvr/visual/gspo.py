@@ -27,7 +27,7 @@ def read_reward(needle: str, completion: str) -> float:
 REWARDS = {"read": read_reward}  # edit / ground rewards plug in here (edit_eval, grounding.box_iou)
 
 
-class GRPOTrainer:
+class GSPOTrainer:
     """Group-Relative Policy Optimization over a frozen-base + trainable-projector(+LoRA) adapter."""
 
     def __init__(self, adapter: VisualAdapter, reward_fn=read_reward, *, group_size: int = 8,
