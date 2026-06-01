@@ -22,12 +22,20 @@ from laguna_rlvr.visual.corpora import (CORPUS_KIND, DEFAULT_VQA, QASFTDataset, 
                                         load_vqa, read_question)
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.model import IMAGE_TOKEN, VisualAdapter
-from laguna_rlvr.visual.multiturn_qa import _match, dataset_qa_accuracy
+from laguna_rlvr.visual.multiturn_qa import _match, _norm, dataset_qa_accuracy
 
 
 def read_reward(needle: str, completion: str) -> float:
-    """Verifiable read reward: 1.0 if the completion contains the answer needle (token-F1 match)."""
-    return float(_match(needle, completion))
+    """SHAPED verifiable read reward: 1.0 for a real read (exact/substantial substring), else partial
+    credit (token-overlap x 0.5, capped below the exact reward). A binary 0/1 reward is too sparse to
+    bootstrap GSPO — from a ~10% reader, sampled groups come out all-zeros, so the group-relative
+    advantage is zero and there's no gradient (caught: reward 0.000 at G=4). Partial credit gives reward
+    *variance* within the group (warmer completions score higher) -> a gradient toward better reads
+    before exact hits, while exact reads (1.0) stay preferred over plausible-but-wrong overlap (<=0.5)."""
+    if _match(needle, completion):
+        return 1.0
+    nt, rt = set(_norm(needle).split()), set(_norm(completion).split())
+    return 0.5 * (2 * len(nt & rt) / (len(nt) + len(rt))) if nt and rt else 0.0
 
 
 REWARDS = {"read": read_reward}  # edit / ground rewards plug in here (edit_eval, grounding.box_iou)
