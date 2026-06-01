@@ -33,6 +33,9 @@ _PROMPT = (f"{IMAGE_TOKEN}\nWrite a single self-contained HTML document (inline 
            "this web page as closely as possible. Output only the HTML.")
 _VIEWPORT = (1280, 960)
 _METRICS = ("visual_sim", "block_match", "text", "position", "color")
+# `final` weights: visual_sim is down-weighted because it saturates (any two web screenshots score
+# ~0.95 in encoder space); the structural/content dims carry the score. Sum = 1.0.
+_FINAL_WEIGHTS = {"visual_sim": 0.1, "block_match": 0.25, "text": 0.25, "position": 0.2, "color": 0.2}
 
 # Collect each visible text node's content + on-screen bounding box + computed color — the rendered
 # "blocks" the position/color/block-match dimensions compare (empty / zero-size nodes are skipped).
@@ -117,27 +120,27 @@ def _center(box: list[float]) -> tuple[float, float]:
     return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
 
 
-def _position(matches: list, ref_diag: float) -> float:
-    """1 - mean center-distance (normalized by the reference page diagonal) over matched blocks."""
-    if not matches or ref_diag <= 0:
-        return float(not matches)
-    dists = []
-    for g, r in matches:
-        (gx, gy), (rx, ry) = _center(g["box"]), _center(r["box"])
-        dists.append(min(1.0, ((gx - rx) ** 2 + (gy - ry) ** 2) ** 0.5 / ref_diag))
-    return 1 - sum(dists) / len(dists)
+def _position(matches: list, ref_diag: float, n_total: int) -> float:
+    """Positional accuracy summed over matched blocks but normalized by TOTAL blocks — so unmatched
+    blocks count as 0 and it can't read high when only a few blocks matched (the artifact that made the
+    baseline's `position` 1.0 at 12% coverage). Each match scores 1 - center-distance/page-diagonal."""
+    if not n_total or ref_diag <= 0:
+        return float(not n_total)
+    score = sum(1 - min(1.0, ((gx - rx) ** 2 + (gy - ry) ** 2) ** 0.5 / ref_diag)
+                for g, r in matches
+                for (gx, gy), (rx, ry) in [(_center(g["box"]), _center(r["box"]))])
+    return score / n_total
 
 
-def _color(matches: list) -> float:
-    """1 - mean RGB distance (normalized by max sqrt(3*255^2)) over matched blocks."""
-    if not matches:
+def _color(matches: list, n_total: int) -> float:
+    """Color accuracy summed over matched blocks, normalized by TOTAL blocks (unmatched -> 0). Each
+    match scores 1 - RGB-distance / max(sqrt(3*255^2))."""
+    if not n_total:
         return 1.0
     max_d = (3 * 255 ** 2) ** 0.5
-    dists = []
-    for g, r in matches:
-        gc, rc = _parse_rgb(g["color"]), _parse_rgb(r["color"])
-        dists.append(sum((a - b) ** 2 for a, b in zip(gc, rc)) ** 0.5 / max_d)
-    return 1 - sum(dists) / len(dists)
+    score = sum(1 - sum((a - b) ** 2 for a, b in zip(_parse_rgb(g["color"]), _parse_rgb(r["color"]))) ** 0.5 / max_d
+                for g, r in matches)
+    return score / n_total
 
 
 @torch.no_grad()
@@ -169,8 +172,8 @@ def _score_pair(adapter: VisualAdapter, gen_img: Image.Image, gen_blocks: list[d
     return {"visual_sim": _visual_sim(adapter, gen_img, ref_img),
             "block_match": len(matches) / denom if denom else 1.0,
             "text": _text_f1(gen_blocks, ref_blocks),
-            "position": _position(matches, ref_diag),
-            "color": _color(matches)}
+            "position": _position(matches, ref_diag, denom),
+            "color": _color(matches, denom)}
 
 
 def design2code_eval(adapter: VisualAdapter, items, n: int | None = None,
@@ -200,8 +203,11 @@ def design2code_eval(adapter: VisualAdapter, items, n: int | None = None,
                     agg[k].append(v)
         finally:
             browser.close()
-    out = {f"{prefix}/metrics/{k}": sum(agg[k]) / len(agg[k]) for k in _METRICS if agg[k]}
-    out[f"{prefix}/metrics/final"] = sum(out.values()) / len(out) if out else 0.0
+    means = {k: sum(agg[k]) / len(agg[k]) for k in _METRICS if agg[k]}
+    out = {f"{prefix}/metrics/{k}": v for k, v in means.items()}
+    # weighted mean (renormalized over present dims) — down-weights the saturated visual_sim
+    wsum = sum(_FINAL_WEIGHTS[k] for k in means)
+    out[f"{prefix}/metrics/final"] = sum(_FINAL_WEIGHTS[k] * v for k, v in means.items()) / wsum if means else 0.0
     # render_rate (like grounding's parse_rate): separates "emitted broken HTML" from "rendered but wrong"
     out[f"{prefix}/metrics/render_rate"] = rendered / len(pairs) if pairs else 0.0
     return out
