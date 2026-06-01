@@ -297,13 +297,17 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             gen_str += f"  qa_acc {metrics['qa/metrics/accuracy']:.3f}"
                             gen_str += "".join(f" {k.rsplit('_', 1)[1]}={v:.2f}"
                                                for k, v in metrics.items() if "/acc_" in k)
+                        # qa_acc is noisy (small eval set) — it wobbles down between peaks, so a tight
+                        # patience early-stops too soon (NaFlex died at step 1119). Be 3x more tolerant
+                        # on qa than on the smooth val-loss signal.
+                        eff_patience = patience * 3 if objective == "qa" else patience
                         sel = f"best qa {best_qa:.3f}" if objective == "qa" else f"best val {best_val:.4f}"
-                        print(f"  val {last_val:.4f} ({sel}, {since_improve}/{patience}){gen_str}", flush=True)
+                        print(f"  val {last_val:.4f} ({sel}, {since_improve}/{eff_patience}){gen_str}", flush=True)
                         if run:
                             run.log(metrics, step=step)
-                        if since_improve >= patience:
+                        if since_improve >= eff_patience:
                             sig = "qa_acc" if objective == "qa" else "val"
-                            print(f"early stop: no {sig} improvement in {patience} evals", flush=True)
+                            print(f"early stop: no {sig} improvement in {eff_patience} evals", flush=True)
                             stop = True
                     step += 1
                     if step % val_every == 0:  # crash-recovery checkpoint at the val cadence
