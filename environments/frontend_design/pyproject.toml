@@ -1,0 +1,22 @@
+[project]
+name = "frontend-design"
+description = "Multi-turn frontend-coding env: read a UI design via a tool, write HTML/CSS to match it."
+tags = ["frontend", "html", "design", "tool-use", "multi-turn", "eval", "multimodal"]
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "verifiers>=0.1.14",
+    "datasets>=2.19",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+# laguna_rlvr/ is vendored in only at push time (gitignored), so the hosted container is self-contained.
+include = ["frontend_design.py", "pyproject.toml", "laguna_rlvr/**/*.py"]
+
+[tool.verifiers.eval]
+num_examples = 3
+rollouts_per_example = 1
