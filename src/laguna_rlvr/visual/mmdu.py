@@ -36,6 +36,9 @@ _STOP = frozenset(
 )
 
 
+_LOG_EPISODES = 4  # sample episodes whose transcripts are logged to the W&B table when a run is passed
+
+
 def _tokens(s: str) -> set[str]:
     return set(_norm(s).split())
 
@@ -101,8 +104,8 @@ class MMDUDataset(Dataset):
         return self._parse(json.loads(row["conversations"]), row["images"])
 
 
-def mmdu_eval(adapter: VisualAdapter, episodes, max_new_tokens: int = 128,
-              prefix: str = "mmdu") -> dict[str, float]:
+def mmdu_eval(adapter: VisualAdapter, episodes, max_new_tokens: int = 128, prefix: str = "mmdu",
+              run=None, step: int | None = None) -> dict[str, float]:
     """Multi-turn dialogue proxy scorer over MMDU `episodes` (each a list of turn dicts from
     `MMDUDataset`). Builds one `Turn` per user turn and runs the whole episode through `adapter.chat`
     (one reply per turn, conditioned on all prior turns + images), then:
@@ -111,16 +114,21 @@ def mmdu_eval(adapter: VisualAdapter, episodes, max_new_tokens: int = 128,
         whose reply re-surfaces content tokens from an EARLIER turn's reference; if no later reply shares
         any such token, fall back to the final reply's overlap with the FIRST turn's reference.
 
-    NOT the official MMDU metric (GPT-4 multi-dimensional judging) — a cheap in-loop overlap proxy."""
+    NOT the official MMDU metric (GPT-4 multi-dimensional judging) — a cheap in-loop overlap proxy.
+    With `run`, logs a W&B table of sample conversation transcripts (turn / reply / reference)."""
     accs: list[float] = []
     recalls: list[float] = []
-    for episode in episodes:
+    transcript: list[tuple] = []  # (episode, turn, question, reply, reference, overlap) for the W&B table
+    for ep_i, episode in enumerate(episodes):
         if not episode:
             continue
         turns = [Turn(t["text"], t["images"]) for t in episode]
         replies = adapter.chat(turns, max_new_tokens=max_new_tokens)
         refs = [t["reference"] for t in episode]
         accs.extend(_overlap(reply, ref) for reply, ref in zip(replies, refs))
+        if ep_i < _LOG_EPISODES:
+            transcript.extend((ep_i, ti, t["text"], reply, ref, round(_overlap(reply, ref), 3))
+                              for ti, (t, reply, ref) in enumerate(zip(episode, replies, refs)))
         if len(episode) < 2:
             continue
         prior: set[str] = set(_content_tokens(refs[0]))
@@ -129,5 +137,12 @@ def mmdu_eval(adapter: VisualAdapter, episodes, max_new_tokens: int = 128,
             hits += bool(_content_tokens(reply) & prior)
             prior |= _content_tokens(ref)
         recalls.append(hits / (len(episode) - 1) if hits else _overlap(replies[-1], refs[0]))
+    if run is not None and transcript:
+        import wandb
+
+        table = wandb.Table(columns=["episode", "turn", "question", "reply", "reference", "overlap"])
+        for ep_i, ti, q, reply, ref, ov in transcript:
+            table.add_data(ep_i, ti, q[:500], reply[:500], ref[:500], ov)
+        run.log({f"{prefix}/transcripts": table}, step=step)
     return {f"{prefix}/metrics/accuracy": sum(accs) / max(len(accs), 1),
             f"{prefix}/metrics/recall": sum(recalls) / max(len(recalls), 1)}

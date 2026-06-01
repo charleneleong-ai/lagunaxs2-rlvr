@@ -60,3 +60,18 @@ def test_mmdu_eval_aggregates_over_episodes():
     adapter = _FakeAdapter([["alpha beta", "nope"], ["nope", "three four"]])
     m = mmdu_eval(adapter, [ep1, ep2])
     assert m["mmdu/metrics/accuracy"] == pytest.approx(0.5)
+
+
+def test_mmdu_eval_logs_transcript_table_when_run_given():
+    class _Run:
+        def __init__(self):
+            self.logged = {}
+
+        def log(self, d, step=None):
+            self.logged.update(d)
+
+    ep = [_turn("<image> q1", "reply one"), _turn("q2", "reply two")]
+    run = _Run()
+    out = mmdu_eval(_FakeAdapter([["reply one", "reply two"]]), [ep], run=run)
+    assert any(k.endswith("/transcripts") for k in run.logged)  # transcript table logged
+    assert "mmdu/metrics/accuracy" in out

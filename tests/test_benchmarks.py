@@ -45,3 +45,27 @@ def test_run_benchmarks_skips_a_failing_benchmark(monkeypatch):
     # the failing benchmark is skipped; the good one still scores
     out = benchmarks.run_benchmarks(adapter=object(), names=["bad", "good"], n=3)
     assert out == {"good/metrics/accuracy": 1.0}
+
+
+def test_run_benchmarks_passes_run_only_to_scorers_that_accept_it(monkeypatch):
+    seen = {}
+
+    def with_run(adapter, items, run=None, step=None):
+        seen["with"] = run
+        return {"a/metrics/x": 1.0}
+
+    def without_run(adapter, items):
+        seen["without"] = "called"
+        return {"b/metrics/x": 1.0}
+
+    monkeypatch.setattr(benchmarks, "BENCHMARKS", {
+        "a": lambda n: ([0] * n, with_run),
+        "b": lambda n: ([0] * n, without_run),
+    })
+    class _Run:
+        def log(self, d, step=None):
+            pass
+
+    sentinel = _Run()
+    benchmarks.run_benchmarks(adapter=object(), names=["a", "b"], n=2, run=sentinel, step=7)
+    assert seen["with"] is sentinel and seen["without"] == "called"  # run injected only where accepted

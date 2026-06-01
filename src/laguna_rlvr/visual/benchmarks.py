@@ -18,9 +18,12 @@ Deferred to a next stage (need heavier infra — see docs/specs/external-benchma
 from __future__ import annotations
 
 import functools
+import inspect
+from pathlib import Path
 
 import torch
 import typer
+import wandb
 
 from laguna_rlvr.visual import design2code, grounding, mmdu, mmmu, ocrbench, screenspot
 from laguna_rlvr.visual.encoders import load_encoder
@@ -50,7 +53,10 @@ def run_benchmarks(adapter: VisualAdapter, names: list[str], n: int = 64,
         try:  # a flaky external dataset / render failure skips that benchmark, not the whole suite
             dataset, scorer = BENCHMARKS[name](n)
             items = [dataset[i] for i in range(len(dataset))]
-            metrics = scorer(adapter, items)
+            # scorers that accept `run` (design2code, mmdu) also log qualitative samples (image
+            # pairs / conversation transcripts) as W&B tables; the rest just return scalar metrics.
+            extra = {"run": run, "step": step} if "run" in inspect.signature(scorer).parameters else {}
+            metrics = scorer(adapter, items, **extra)
         except Exception as e:
             print(f"[{name}] SKIPPED — {type(e).__name__}: {e}", flush=True)
             continue
@@ -72,12 +78,18 @@ def main(
                                           "load a LoRA checkpoint)"),
     suite: str = typer.Option(",".join(DEFAULT_SUITE), help="comma-list of benchmarks to run"),
     n: int = typer.Option(64, help="held-out examples per benchmark"),
+    wandb_tracking: bool = typer.Option(True, "--wandb/--no-wandb", help="log metrics + sample "
+                                        "image-pairs / conversation transcripts to W&B"),
 ) -> None:
     """Evaluate a trained adapter on the external benchmark suite (the metric IS the capability)."""
     adapter = VisualAdapter(load_encoder(encoder, pool=(4 if "qwen" in encoder else 1)), base,
                             projector_kind=projector, use_anchor=False, unfreeze=unfreeze)
     adapter.load_adapter_state_dict(torch.load(ckpt, map_location=adapter.llm.device))
-    run_benchmarks(adapter, [s for s in suite.split(",") if s], n=n)
+    run = wandb.init(project="laguna-mm-adapter", name=f"{Path(ckpt).parent.name}__bench",
+                     config={"ckpt": ckpt, "encoder": encoder, "suite": suite, "n": n}) if wandb_tracking else None
+    run_benchmarks(adapter, [s for s in suite.split(",") if s], n=n, run=run)
+    if run is not None:
+        run.finish()
 
 
 if __name__ == "__main__":

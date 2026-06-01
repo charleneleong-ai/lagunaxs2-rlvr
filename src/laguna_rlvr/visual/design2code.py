@@ -36,6 +36,7 @@ _METRICS = ("visual_sim", "block_match", "text", "position", "color")
 # `final` weights: visual_sim is down-weighted because it saturates (any two web screenshots score
 # ~0.95 in encoder space); the structural/content dims carry the score. Sum = 1.0.
 _FINAL_WEIGHTS = {"visual_sim": 0.1, "block_match": 0.25, "text": 0.25, "position": 0.2, "color": 0.2}
+_LOG_SAMPLES = 8  # sample render-pairs logged to the W&B image-pair table when a run is passed
 
 # Collect each visible text node's content + on-screen bounding box + computed color — the rendered
 # "blocks" the position/color/block-match dimensions compare (empty / zero-size nodes are skipped).
@@ -176,14 +177,16 @@ def _score_pair(adapter: VisualAdapter, gen_img: Image.Image, gen_blocks: list[d
             "color": _color(matches, denom)}
 
 
-def design2code_eval(adapter: VisualAdapter, items, n: int | None = None,
-                     max_new_tokens: int = 1024, prefix: str = "d2c") -> dict[str, float]:
+def design2code_eval(adapter: VisualAdapter, items, n: int | None = None, max_new_tokens: int = 1024,
+                     prefix: str = "d2c", run=None, step: int | None = None) -> dict[str, float]:
     """`items`: (screenshot, reference-HTML). The adapter writes HTML from the screenshot; render both
-    and score the five Design2Code dimensions. Unrenderable generations score 0 on every dimension."""
+    and score the five Design2Code dimensions. Unrenderable generations score 0 on every dimension.
+    With `run`, logs a W&B table of sample reference-vs-generated render pairs for visual inspection."""
     from playwright.sync_api import sync_playwright
 
     pairs = list(items)[:n] if n is not None else list(items)
     agg: dict[str, list[float]] = defaultdict(list)
+    samples: list[tuple] = []  # (ref_img, gen_img, scores) for the W&B image-pair table
     rendered = 0
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -199,8 +202,11 @@ def design2code_eval(adapter: VisualAdapter, items, n: int | None = None,
                         agg[k].append(0.0)
                     continue
                 rendered += 1
-                for k, v in _score_pair(adapter, gen_img, gen_blocks, ref_img, ref_blocks).items():
+                scores = _score_pair(adapter, gen_img, gen_blocks, ref_img, ref_blocks)
+                for k, v in scores.items():
                     agg[k].append(v)
+                if len(samples) < _LOG_SAMPLES:
+                    samples.append((ref_img, gen_img, scores))
         finally:
             browser.close()
     means = {k: sum(agg[k]) / len(agg[k]) for k in _METRICS if agg[k]}
@@ -210,4 +216,12 @@ def design2code_eval(adapter: VisualAdapter, items, n: int | None = None,
     out[f"{prefix}/metrics/final"] = sum(_FINAL_WEIGHTS[k] * v for k, v in means.items()) / wsum if means else 0.0
     # render_rate (like grounding's parse_rate): separates "emitted broken HTML" from "rendered but wrong"
     out[f"{prefix}/metrics/render_rate"] = rendered / len(pairs) if pairs else 0.0
+    if run is not None and samples:
+        import wandb
+
+        table = wandb.Table(columns=["reference", "generated", "block_match", "text", "visual_sim"])
+        for ref_img, gen_img, sc in samples:
+            table.add_data(wandb.Image(ref_img), wandb.Image(gen_img),
+                           round(sc["block_match"], 3), round(sc["text"], 3), round(sc["visual_sim"], 3))
+        run.log({f"{prefix}/samples": table}, step=step)
     return out
