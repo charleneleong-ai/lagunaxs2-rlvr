@@ -32,3 +32,16 @@ def test_run_benchmarks_aggregates_and_logs(monkeypatch):
 def test_run_benchmarks_rejects_unknown_name():
     with pytest.raises(ValueError, match="unknown benchmark"):
         benchmarks.run_benchmarks(adapter=object(), names=["nope"], n=1)
+
+
+def test_run_benchmarks_skips_a_failing_benchmark(monkeypatch):
+    def _boom(n):
+        raise RuntimeError("dataset download failed")
+
+    monkeypatch.setattr(benchmarks, "BENCHMARKS", {
+        "bad": _boom,
+        "good": lambda n: ([0] * n, lambda adapter, items: {"good/metrics/accuracy": 1.0}),
+    })
+    # the failing benchmark is skipped; the good one still scores
+    out = benchmarks.run_benchmarks(adapter=object(), names=["bad", "good"], n=3)
+    assert out == {"good/metrics/accuracy": 1.0}

@@ -47,9 +47,13 @@ def run_benchmarks(adapter: VisualAdapter, names: list[str], n: int = 64,
         raise ValueError(f"unknown benchmark(s) {unknown} (have: {', '.join(BENCHMARKS)})")
     results: dict[str, float] = {}
     for name in names:
-        dataset, scorer = BENCHMARKS[name](n)
-        items = [dataset[i] for i in range(len(dataset))]
-        metrics = scorer(adapter, items)
+        try:  # a flaky external dataset / render failure skips that benchmark, not the whole suite
+            dataset, scorer = BENCHMARKS[name](n)
+            items = [dataset[i] for i in range(len(dataset))]
+            metrics = scorer(adapter, items)
+        except Exception as e:
+            print(f"[{name}] SKIPPED — {type(e).__name__}: {e}", flush=True)
+            continue
         results.update(metrics)
         print(f"[{name}] " + "  ".join(f"{k.split('/')[-1]} {v:.3f}" for k, v in metrics.items()), flush=True)
         if run is not None:
@@ -64,12 +68,14 @@ app = typer.Typer(add_completion=False, help=__doc__)
 def main(
     ckpt: str = typer.Option(..., help="adapter checkpoint (projector + LoRA) to evaluate"),
     encoder: str = "siglip", base: str = "poolside/Laguna-XS.2", projector: str = "resampler",
+    unfreeze: str = typer.Option("", help="'' = projector only | lora = build LoRA modules (needed to "
+                                          "load a LoRA checkpoint)"),
     suite: str = typer.Option(",".join(DEFAULT_SUITE), help="comma-list of benchmarks to run"),
     n: int = typer.Option(64, help="held-out examples per benchmark"),
 ) -> None:
     """Evaluate a trained adapter on the external benchmark suite (the metric IS the capability)."""
     adapter = VisualAdapter(load_encoder(encoder, pool=(4 if "qwen" in encoder else 1)), base,
-                            projector_kind=projector, use_anchor=False)
+                            projector_kind=projector, use_anchor=False, unfreeze=unfreeze)
     adapter.load_adapter_state_dict(torch.load(ckpt, map_location=adapter.llm.device))
     run_benchmarks(adapter, [s for s in suite.split(",") if s], n=n)
 
