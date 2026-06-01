@@ -28,10 +28,10 @@ class TestScoreMarkup:
 
 
 class TestEnv:
-    def test_builtin_designs_have_requirements_and_hide_spec(self):
+    def test_designs_have_requirements_and_hide_spec(self):
         env = fd.load_environment()
         rows = env.eval_dataset.to_list()
-        assert len(rows) == len(fd._BUILTIN_DESIGNS)
+        assert len(rows) >= len(fd._BUILTIN_DESIGNS)  # curated seed + synthetic pool
         for row in rows:
             assert row["info"]["labels"] and len(row["info"]["labels"]) == len(row["info"]["patterns"])
             # the spec text is behind the DESIGN tool, not leaked into the prompt
@@ -58,3 +58,10 @@ class TestEnv:
         asyncio.run(env.setup_state(state))
         obs = asyncio.run(env.env_response([{"role": "assistant", "content": "DESIGN: login.png"}], state))
         assert "blue Sign In button" in obs[0]["content"] and not state["solved"]
+
+
+def test_get_dataset_is_set_for_training():
+    """Hosted RL's buffer calls env.get_dataset(seed=...) on `dataset` — must not raise 'dataset is
+    not set'. Local guard for the failure that killed the Prime run at buffer init."""
+    ds = fd.load_environment().get_dataset(seed=0)
+    assert ds is not None and len(ds) >= 24

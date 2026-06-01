@@ -36,11 +36,29 @@ class TestOCRBackend:
         assert "no image" in ocr_tool.ocr("wrong.png", {"invoice.png": "Total: $5"})
 
 
+class TestSynthDocs:
+    def test_count_and_hidden_answer_invariant(self):
+        docs = ocr_tool._synth_docs(32)
+        assert len(docs) == 32
+        for iid, text, question, answer in docs:
+            assert ocr_tool._norm(answer) in ocr_tool._norm(text), "answer must be OCR-readable"
+            # The answer value must never leak into the question — only the field LABEL does.
+            assert ocr_tool._norm(answer) not in ocr_tool._norm(question)
+            assert iid in question
+
+    def test_distinct_image_ids(self):
+        docs = ocr_tool._synth_docs(32)
+        assert len({iid for iid, *_ in docs}) == 32
+
+    def test_deterministic(self):
+        assert ocr_tool._synth_docs(32, seed=7) == ocr_tool._synth_docs(32, seed=7)
+
+
 class TestEnv:
-    def test_builtin_rows_hide_answer_behind_image(self):
+    def test_rows_hide_answer_behind_image(self):
         env = ocr_tool.load_environment()
         rows = env.eval_dataset.to_list()
-        assert len(rows) == len(ocr_tool._BUILTIN_DOCS)
+        assert len(rows) >= 24
         for row in rows:
             # The answer must NOT be readable from the prompt — it lives only in the OCR-able doc.
             assert ocr_tool._norm(row["info"]["answer"]) not in ocr_tool._norm(row["question"])
@@ -83,3 +101,11 @@ class TestReadScore:
         asyncio.run(env.setup_state(state))
         asyncio.run(env.env_response([{"role": "assistant", "content": "ANSWER: jane@clinic.com"}], state))
         assert not state["solved"] and 0.0 < env._reward(state) < 1.0  # graded, not a 0 cliff
+
+
+def test_get_dataset_is_set_for_training():
+    """Hosted RL's buffer does exactly this — env.get_dataset(seed=...). It must NOT raise
+    'dataset is not set' (the ValueError that killed the Prime run at buffer init: training reads
+    `dataset`, not `eval_dataset`). This local check catches that class of failure before any push."""
+    ds = ocr_tool.load_environment().get_dataset(seed=0)
+    assert ds is not None and len(ds) >= 24
