@@ -113,6 +113,18 @@ def _log_qa_samples(run, n: int = 4) -> None:
     run.log({"qa/samples": table}, step=0)
 
 
+def _log_predictions(run, adapter, items: list, key: str, step: int, n: int = 8) -> None:
+    """Log (image, target, prediction) for a few items so what the adapter actually READS is inspectable
+    next to the val/eval scores as training progresses (the input corpus is logged once at step 0; this
+    is the model's evolving output)."""
+    sample = items[:n]
+    preds = adapter.transcribe([it[0] for it in sample])
+    table = wandb.Table(columns=["image", "target", "prediction"])
+    for it, p in zip(sample, preds):
+        table.add_data(wandb.Image(it[0]), str(it[1])[:200], str(p)[:200])
+    run.log({key: table}, step=step)
+
+
 def _save_resume(path: Path, adapter: VisualAdapter, opt, step: int, run) -> None:
     """Atomically write resume state (trainable adapter + optimizer + step + W&B id) for crash recovery."""
     tmp = path.with_suffix(".tmp")
@@ -288,6 +300,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             metrics.update(generation_metrics(adapter, ocr_probe, "val/ocr"))  # base-OCR retention
                             # base-preservation gauge — projected tokens in-distribution vs base embeds
                             metrics["val/metrics/embed_norm_ratio"] = adapter.embedding_norm_ratio(wer_images)
+                            if run:  # (image, target, prediction) samples — what it reads, over training
+                                _log_predictions(run, adapter, wer_items, "val/samples", step)
                         gen_str = ""  # surface the generation-cadence metrics in the text log, not just W&B
                         if "val/metrics/wer" in metrics:
                             gen_str += f"  wer {metrics['val/metrics/wer']:.3f} cer {metrics['val/metrics/cer']:.3f}"
@@ -327,6 +341,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                       f"  ocr_wer {ocr['eval/ocr/metrics/wer']:.3f}", flush=True)
                 if run:
                     run.log({"eval/loss/total": eval_loss, "eval/metrics/embed_norm_ratio": drift, **ocr}, step=step)
+                    _log_predictions(run, adapter, ocr_probe, "eval/samples", step)
             if qa_eval:  # single-turn read accuracy (per corpus) + multi-turn cross-turn recall
                 from laguna_rlvr.visual.multiturn_qa import dataset_qa_accuracy, evaluate_multiturn_qa
 
