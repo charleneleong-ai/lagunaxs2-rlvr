@@ -66,6 +66,13 @@ def _match(needle: str, reply: str) -> bool:
     return (2 * inter / (len(nt) + len(rt))) >= 0.5
 
 
+def ocr_grounding(answer: str, ocr_text: str) -> bool:
+    """Is the answer present in the image's visible OCR text? Separates a real *read* (the answer is on
+    the page) from *confabulation* (invented) — the diagnostic for our failure mode, and a verifiable
+    'did it read from the pixels' reward for GRPO. `ocr_text` = the dataset's OCR field, joined."""
+    return bool(_norm(answer)) and _norm(answer) in _norm(ocr_text)
+
+
 # ── episodes + manifest ──────────────────────────────────────────────────────────────────────────
 
 def save_manifest(episodes: list[Episode], path: Path = _MANIFEST) -> None:
