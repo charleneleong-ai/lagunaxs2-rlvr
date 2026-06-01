@@ -13,10 +13,16 @@ double as rewards, so the metric bank IS the objective bank.
 """
 from __future__ import annotations
 
-import torch
+import random
 
+import torch
+import typer
+
+from laguna_rlvr.visual.corpora import (CORPUS_KIND, DEFAULT_VQA, QASFTDataset, build_corpus,
+                                        load_vqa, read_question)
+from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.model import IMAGE_TOKEN, VisualAdapter
-from laguna_rlvr.visual.multiturn_qa import _match
+from laguna_rlvr.visual.multiturn_qa import _match, dataset_qa_accuracy
 
 
 def read_reward(needle: str, completion: str) -> float:
@@ -91,4 +97,54 @@ class GSPOTrainer:
             tot_loss += loss.item() * len(items)
             tot_rew += rew.mean().item()
         self.opt.step()
-        return {"grpo/loss": tot_loss / len(items), "grpo/reward": tot_rew / len(items)}
+        return {"gspo/loss": tot_loss / len(items), "gspo/reward": tot_rew / len(items)}
+
+
+app = typer.Typer(add_completion=False, help=__doc__)
+
+
+@app.command()
+def main(
+    init_ckpt: str = typer.Option(..., help="warm-start checkpoint (projector + LoRA) from SFT"),
+    encoder: str = "siglip", base: str = "poolside/Laguna-XS.2", projector: str = "resampler",
+    unfreeze: str = "lora", reward: str = "read", mode: str = "gspo",
+    steps: int = 1500, group_size: int = 8, batch: int = 2, lr: float = 1e-6,
+    n_train: int = 512, eval_every: int = 100, seed: int = 0, out: str = "results/visual",
+    name_suffix: str = "gspo",
+) -> None:
+    """RLVR fine-tune the warm-started adapter on a verifiable reward via GSPO (the metric IS the loss)."""
+    from pathlib import Path
+
+    torch.manual_seed(seed)
+    random.seed(seed)
+    a = VisualAdapter(load_encoder(encoder, pool=(4 if "qwen" in encoder else 1)), base,
+                      projector_kind=projector, use_anchor=False, unfreeze=unfreeze)
+    a.load_adapter_state_dict(torch.load(init_ckpt, map_location=a.llm.device))
+    print(f"warm-started from {init_ckpt}", flush=True)
+
+    full = QASFTDataset(build_corpus("mix", n_train), vqa_sources=load_vqa(DEFAULT_VQA, n_train))
+    items = [(full[i][0], full[i][3] or read_question(CORPUS_KIND.get(full[i][2])), full[i][1])
+             for i in range(len(full))]  # (image, question, needle)
+    eval_items = [full[i] for i in range(min(40, len(full)))]
+    print(f"GSPO over {len(items)} items | reward={reward} mode={mode} G={group_size} batch={batch}", flush=True)
+
+    trainer = GSPOTrainer(a, reward_fn=REWARDS[reward], group_size=group_size, lr=lr, mode=mode)
+    out_dir = Path(out) / f"{encoder}__{Path(base).name}__{name_suffix}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    best = -1.0
+    for step in range(1, steps + 1):
+        m = trainer.step(random.sample(items, batch))
+        if step % 20 == 0:
+            print(f"step {step}/{steps}  loss {m['gspo/loss']:.4f}  reward {m['gspo/reward']:.3f}", flush=True)
+        if step % eval_every == 0:
+            torch.cuda.empty_cache()
+            qa = dataset_qa_accuracy(a, eval_items)["qa/metrics/accuracy"]
+            print(f"  [eval] step {step}: qa_acc {qa:.3f}  (best {max(best, qa):.3f})", flush=True)
+            if qa > best:
+                best = qa
+                torch.save(a.adapter_state_dict(), out_dir / "best.pt")
+    print(f"done. best qa_acc {best:.3f} -> {out_dir}/best.pt", flush=True)
+
+
+if __name__ == "__main__":
+    app()
