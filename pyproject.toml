@@ -41,4 +41,4 @@ build-backend = "hatchling.build"
 packages = ["src/laguna_rlvr"]
 
 [tool.uv.sources]
-autoresearch = { path = "../autoresearch" }
+autoresearch = { git = "https://github.com/charleneleong-ai/autoresearch.git", tag = "v0.29.0" }
