@@ -312,13 +312,19 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                       f"  ocr_wer {ocr['eval/ocr/metrics/wer']:.3f}", flush=True)
                 if run:
                     run.log({"eval/loss/total": eval_loss, "eval/metrics/embed_norm_ratio": drift, **ocr}, step=step)
-            if qa_eval:  # full-distribution read accuracy on the held-out val split, broken out per corpus
-                from laguna_rlvr.visual.multiturn_qa import dataset_qa_accuracy
+            if qa_eval:  # single-turn read accuracy (per corpus) + multi-turn cross-turn recall
+                from laguna_rlvr.visual.multiturn_qa import dataset_qa_accuracy, evaluate_multiturn_qa
 
                 qa = dataset_qa_accuracy(adapter, qa_eval_items)  # the target metric (incl. VQA/synthetic)
                 qa_acc = qa["qa/metrics/accuracy"]
                 per_c = "  ".join(f"{k.rsplit('_', 1)[1]} {v:.2f}" for k, v in qa.items() if "/acc_" in k)
+                # multi-turn: read A, read B, recall A — qa_mt/recall = conversation memory (cross-turn)
+                mt = evaluate_multiturn_qa(adapter, n=12, source="mixture", prefix="qa_mt")
+                qa.update(mt)
+                qa_recall = mt["qa_mt/metrics/recall"]
                 print(f"  full-dataset QA: acc {qa_acc:.3f}  [{per_c}]", flush=True)
+                print(f"  multi-turn: acc {mt['qa_mt/metrics/accuracy']:.3f}  recall {qa_recall:.3f} "
+                      "(cross-turn memory)", flush=True)
                 if run:
                     run.log(qa, step=step)
         torch.save(adapter.adapter_state_dict(), ckpt)  # = best-val weights

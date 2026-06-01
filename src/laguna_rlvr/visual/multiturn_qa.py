@@ -48,7 +48,22 @@ class Episode:
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", s.lower()).strip()
+    return re.sub(r"\s+", " ", str(s).lower()).strip()
+
+
+def _match(needle: str, reply: str) -> bool:
+    """Loosened read match: exact substring OR token-F1 >= 0.5. The strict substring undercounts real
+    reads the model phrases differently or partially ('Section 4.2 Results' for 'Section 4.2 Results
+    6890', 'University of California' for '…California, Berkeley'); token-F1 credits those without
+    rewarding disjoint hallucinations ('nokia' vs 'samsung' -> 0)."""
+    n, r = _norm(needle), _norm(reply)
+    if n and n in r:
+        return True
+    nt, rt = set(n.split()), set(r.split())
+    if not nt or not rt:
+        return False
+    inter = len(nt & rt)
+    return (2 * inter / (len(nt) + len(rt))) >= 0.5
 
 
 # ── episodes + manifest ──────────────────────────────────────────────────────────────────────────
@@ -162,8 +177,8 @@ def run_qa(run_episode, episodes: list[Episode], prefix: str = "qa") -> dict[str
         r1, r2, r3 = run_episode(ep)
         for ref, reply in ((ep.a, r1), (ep.b, r2)):
             total += 1
-            hits += _norm(ref.needle) in _norm(reply)
-        recall += _norm(ep.a.needle) in _norm(r3)
+            hits += _match(ref.needle, reply)
+        recall += _match(ep.a.needle, r3)
     return {f"{prefix}/metrics/accuracy": hits / max(total, 1),
             f"{prefix}/metrics/recall": recall / max(len(episodes), 1)}
 
@@ -179,7 +194,7 @@ def dataset_qa_accuracy(adapter: VisualAdapter, items: list, max_new_tokens: int
     for img, answer, corpus, question in items:
         q = question or read_question(CORPUS_KIND.get(corpus))
         reply = adapter.chat([Turn(f"{IMAGE_TOKEN}\n{q}", [img])], max_new_tokens=max_new_tokens)[0]
-        per_corpus[corpus][0] += int(_norm(str(answer)) in _norm(reply))
+        per_corpus[corpus][0] += int(_match(answer, reply))
         per_corpus[corpus][1] += 1
     hits, total = (sum(c) for c in zip(*per_corpus.values())) if per_corpus else (0, 0)
     out = {f"{prefix}/metrics/accuracy": hits / max(total, 1)}
@@ -190,9 +205,10 @@ def dataset_qa_accuracy(adapter: VisualAdapter, items: list, max_new_tokens: int
 
 def evaluate_multiturn_qa(adapter: VisualAdapter, n: int = 16, seed: int = 0,
                           max_new_tokens: int = _QA_GEN_TOKENS, *, source: str = "synthetic",
-                          manifest: Path = _MANIFEST) -> dict[str, float]:
-    """Adapter multi-turn QA. `source="synthetic"` (default) = fast offline sanity used in training;
-    `source="mixture"` = the real-corpora benchmark (built + persisted to `manifest` on first run)."""
+                          manifest: Path = _MANIFEST, prefix: str = "qa") -> dict[str, float]:
+    """Adapter multi-turn QA — per-turn reading accuracy + cross-turn recall (does it still recall image
+    A's needle after reading B + a text turn = conversation memory). `source="mixture"` = real-corpora
+    3-turn episodes. `prefix` namespaces the keys (use 'qa_mt' so it doesn't collide with single-turn)."""
     episodes = load_or_build_episodes(source, n, seed, manifest)
     fetch = image_fetcher(episodes)
-    return run_qa(adapter_runner(adapter, fetch, max_new_tokens), episodes)
+    return run_qa(adapter_runner(adapter, fetch, max_new_tokens), episodes, prefix=prefix)
