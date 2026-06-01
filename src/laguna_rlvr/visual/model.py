@@ -90,6 +90,7 @@ class VisualAdapter(nn.Module):
         device: str | None = None,
         unfreeze: str = "",
         use_anchor: bool = True,
+        norm_penalty: float = 0.0,
     ):
         super().__init__()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -97,6 +98,7 @@ class VisualAdapter(nn.Module):
         self.encoder = encoder
         self.unfreeze = unfreeze
         self.use_anchor = use_anchor  # soft-scalar norm match; off lets the projector keep per-token scale
+        self.norm_penalty = norm_penalty  # soft cap on projected-token scale (the --no-anchor ballooning)
         self.llm, self.tok = load_causal_lm(base_llm, self.device, dtype)
         self._add_image_token()  # <image> marker + subtoken-avg init, before the freeze below
         self.llm.eval()
@@ -202,6 +204,15 @@ class VisualAdapter(nn.Module):
         mean_norm = vis.flatten(0, 1).float().norm(dim=-1).mean().clamp_min(1e-6)
         return vis * (self._emb_norm_median / mean_norm).to(vis.dtype)
 
+    def _scale_penalty(self, vis: torch.Tensor) -> torch.Tensor:
+        """Soft cap on the projected-token scale — penalize the mean token norm above the embedding
+        median. Under --no-anchor the resampler's output scale balloons unbounded (~30x), which tracks
+        the qa-accuracy decay (W&B). Scalar loss term; 0 when within base scale or norm_penalty == 0."""
+        if self.norm_penalty <= 0:
+            return vis.sum() * 0.0
+        ratio = vis.flatten(0, 1).float().norm(dim=-1).mean() / self._emb_norm_median
+        return self.norm_penalty * (ratio - 1.0).clamp(min=0) ** 2
+
     def _project(self, images: list, anchor: bool | None = None) -> torch.Tensor:
         feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
         vis = self.projector(feats)  # (B, Nv, D)
@@ -242,7 +253,7 @@ class VisualAdapter(nn.Module):
             losses.append(self.llm(inputs_embeds=inputs, labels=tgt).loss)
         if not losses:  # whole micro-batch skipped — 0 loss tied to the projector so backward is a no-op
             return Output(loss=vis.sum() * 0.0)
-        return Output(loss=torch.stack(losses).mean())
+        return Output(loss=torch.stack(losses).mean() + self._scale_penalty(vis))
 
     def forward_qa(self, images: list, answers: list[str], corpora: list,
                    questions: list | None = None) -> Output:
@@ -268,7 +279,7 @@ class VisualAdapter(nn.Module):
             losses.append(self.llm(inputs_embeds=inputs, labels=tgt).loss)
         if not losses:
             return Output(loss=vis.sum() * 0.0)
-        return Output(loss=torch.stack(losses).mean())
+        return Output(loss=torch.stack(losses).mean() + self._scale_penalty(vis))
 
     @torch.no_grad()
     def transcribe(self, images: list, max_new_tokens: int = 48) -> list[str]:

@@ -129,7 +129,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
           qa_eval: bool = True, description: str = "", init_projector: str = "",
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
-          lr_override: float | None = None, vqa: str = "default") -> Path:
+          lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -146,7 +146,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         raise SystemExit("Guardrail failures for the configured backbone:\n- " + "\n- ".join(issues))
 
     enc = load_encoder(encoder, pool=pool)
-    adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze, use_anchor=use_anchor)
+    adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze,
+                            use_anchor=use_anchor, norm_penalty=norm_penalty)
     opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
 
     # Mixture weights: --mixture overrides the config's [mixture].weights, which overrides _DEFAULT_MIX.
@@ -225,7 +226,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     t0 = time.monotonic()
     step, last_loss, last_val, eval_loss, status = (
         start_step, float("nan"), float("nan"), float("nan"), "CRASH")
-    best_val, since_improve, stop = float("inf"), 0, False
+    best_val, best_qa, since_improve, stop = float("inf"), -1.0, 0, False
     qa_acc, qa_recall = float("nan"), float("nan")
     best_ckpt = out_dir / "best.pt"
     monitor = GPUMonitor()
@@ -259,26 +260,34 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                         window, cwin = None, {}
                     if step % val_every == 0:
                         last_val, val_by_corpus = _val_loss(adapter, val_loader, objective)
-                        # best-checkpoint + early stop on the in-mix val (this run's convergence signal)
-                        if last_val < best_val - min_delta:
-                            best_val, since_improve = last_val, 0
-                            torch.save(adapter.adapter_state_dict(), best_ckpt)
-                        else:
-                            since_improve += 1
-                        metrics = {"val/loss/total": last_val, "val/loss/best": best_val}
+                        metrics = {"val/loss/total": last_val}
                         metrics.update({f"val/loss/{cc}": v for cc, v in val_by_corpus.items()})
                         if eval_loader is not None:  # trend the fixed external eval alongside val
                             eval_loss, _ = _val_loss(adapter, eval_loader, objective)
                             metrics["eval/loss/total"] = eval_loss
-                        if step % gen_every == 0:  # WER/CER (generation) on a coarser cadence
+                        cur_qa = None  # for QA, score read accuracy EVERY val — it's the selection signal
+                        if qa_eval and objective == "qa":
+                            from laguna_rlvr.visual.multiturn_qa import dataset_qa_accuracy
+                            torch.cuda.empty_cache()  # reclaim training fragmentation before generation
+                            metrics.update(dataset_qa_accuracy(adapter, qa_eval_items))
+                            cur_qa = metrics["qa/metrics/accuracy"]
+                        # SELECT + early-stop on the TASK metric (qa_acc), not val loss: min-CE optimizes
+                        # confabulation — val loss is anti-correlated with reading and best-on-val saves
+                        # the *worst* reader (W&B: qa peaks early then decays as val keeps falling).
+                        improved = (cur_qa > best_qa + min_delta) if cur_qa is not None else (last_val < best_val - min_delta)
+                        if improved:
+                            since_improve = 0
+                            best_val, best_qa = min(best_val, last_val), max(best_qa, cur_qa or -1.0)
+                            torch.save(adapter.adapter_state_dict(), best_ckpt)
+                        else:
+                            since_improve += 1
+                        metrics.update({"val/loss/best": best_val, "qa/metrics/best": best_qa})
+                        if step % gen_every == 0:  # WER/CER + embed_norm (slow generation) on a coarser cadence
                             torch.cuda.empty_cache()  # reclaim training fragmentation before generation (OOM margin)
                             metrics.update(generation_metrics(adapter, wer_items, "val"))
                             metrics.update(generation_metrics(adapter, ocr_probe, "val/ocr"))  # base-OCR retention
                             # base-preservation gauge — projected tokens in-distribution vs base embeds
                             metrics["val/metrics/embed_norm_ratio"] = adapter.embedding_norm_ratio(wer_images)
-                            if qa_eval:  # full-distribution single-turn read accuracy, per corpus
-                                from laguna_rlvr.visual.multiturn_qa import dataset_qa_accuracy
-                                metrics.update(dataset_qa_accuracy(adapter, qa_eval_items))
                         gen_str = ""  # surface the generation-cadence metrics in the text log, not just W&B
                         if "val/metrics/wer" in metrics:
                             gen_str += f"  wer {metrics['val/metrics/wer']:.3f} cer {metrics['val/metrics/cer']:.3f}"
@@ -288,11 +297,13 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             gen_str += f"  qa_acc {metrics['qa/metrics/accuracy']:.3f}"
                             gen_str += "".join(f" {k.rsplit('_', 1)[1]}={v:.2f}"
                                                for k, v in metrics.items() if "/acc_" in k)
-                        print(f"  val {last_val:.4f} (best {best_val:.4f}, {since_improve}/{patience}){gen_str}", flush=True)
+                        sel = f"best qa {best_qa:.3f}" if objective == "qa" else f"best val {best_val:.4f}"
+                        print(f"  val {last_val:.4f} ({sel}, {since_improve}/{patience}){gen_str}", flush=True)
                         if run:
                             run.log(metrics, step=step)
                         if since_improve >= patience:
-                            print(f"early stop: no val improvement in {patience} evals", flush=True)
+                            sig = "qa_acc" if objective == "qa" else "val"
+                            print(f"early stop: no {sig} improvement in {patience} evals", flush=True)
                             stop = True
                     step += 1
                     if step % val_every == 0:  # crash-recovery checkpoint at the val cadence
@@ -386,10 +397,11 @@ def main(
     anchor: bool = typer.Option(True, "--anchor/--no-anchor", help="soft-scalar norm match on vision tokens"),
     lr: float = typer.Option(None, help="override the config learning rate"),
     vqa: str = typer.Option("default", help="VQA reading sets for QA-SFT: 'default'=all, comma-list, or '' = none"),
+    norm_penalty: float = typer.Option(0.0, help="soft cap on projected-token scale (--no-anchor ballooning)"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective, unfreeze, anchor, lr, vqa)
+          objective, unfreeze, anchor, lr, vqa, norm_penalty)
 
 
 if __name__ == "__main__":
