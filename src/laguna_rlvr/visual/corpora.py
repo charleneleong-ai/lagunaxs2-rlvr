@@ -189,6 +189,8 @@ VQA_SPECS: dict[str, dict] = {
     "chartqa": dict(repo="lmms-lab/ChartQA", split="test", a_col="answer"),                          # charts
     "docvqa": dict(repo="lmms-lab/DocVQA", config="DocVQA", split="validation", a_col="answers"),    # documents
     "ocrvqa": dict(repo="howard-hou/OCR-VQA", q_col="questions", a_col="answers", paired=True),      # cover titles
+    "infographicvqa": dict(repo="lmms-lab/DocVQA", config="InfographicVQA", split="validation",      # infographics
+                           a_col="answers"),                                                         # (dense text+chart)
 }
 
 

@@ -118,3 +118,39 @@ class VQADataset(Dataset):
     def __getitem__(self, i: int):
         row = self._ds[i]
         return row["image"], row["question"], row["answer"]
+
+
+class ScreenSpotDataset(Dataset):
+    """SCAFFOLD — GUI grounding (ScreenSpot: image + instruction + normalized bbox). Framed as a
+    read+localize triple: (image, "locate '{instruction}' …", bbox-as-text). The whole point of vision
+    on a coding/agentic model. NOTE: grounding is a *different objective* than reading — the answer is
+    a box, so it should be scored by IoU, not the substring/token-F1 reading metric, and it is NOT in
+    DEFAULT_VQA yet. Wire it deliberately once box-IoU scoring is added."""
+
+    def __init__(self, repo: str = "rootsautomation/ScreenSpot", *, split: str = "test", n: int = 2000,
+                 offset: int = 0):
+        key = "screenspot__" + "__".join(str(p) for p in (repo, split, n, offset))
+        self._ds = _cached_or_stream(key, lambda: self._stream(repo, split, n, offset))
+
+    @staticmethod
+    def _stream(repo, split, n, offset) -> HFDataset:
+        stream = load_dataset(repo, split=split, streaming=True)
+        imgs, qs, ans = [], [], []
+        for row in track(islice(stream, offset, offset + n), total=n, description=f"{repo} ({n})"):
+            img, instr, box = row.get("image"), row.get("instruction"), row.get("bbox")
+            if img is not None and instr and box and len(box) == 4:
+                imgs.append(img.convert("RGB"))
+                qs.append(f"Locate the UI element for '{instr}'. Give its bounding box as [x1, y1, x2, y2] in 0-1.")
+                ans.append("[" + ", ".join(f"{c:.3f}" for c in box) + "]")
+        if not imgs:
+            raise RuntimeError(f"no usable rows from {repo}")
+        return HFDataset.from_dict(
+            {"image": imgs, "question": qs, "answer": ans},
+            features=Features({"image": HFImage(), "question": Value("string"), "answer": Value("string")}))
+
+    def __len__(self) -> int:
+        return len(self._ds)
+
+    def __getitem__(self, i: int):
+        row = self._ds[i]
+        return row["image"], row["question"], row["answer"]
