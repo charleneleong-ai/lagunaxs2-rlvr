@@ -1,39 +1,43 @@
 #!/usr/bin/env bash
-# Submit a free hosted Laguna XS.2 RL run on a verifiers env.
+# Submit a free hosted Laguna XS.2 RL run on one or more verifiers envs.
 #
-#   bash scripts/submit_training.sh [ENV_DIR] [CONFIG]
-#   # default:  environments/code_smoke  configs/rl/laguna-xs2.toml       (MBPP code-repair)
-#   # read RL:  bash scripts/submit_training.sh environments/ocr_tool configs/rl/laguna-read-gspo.toml
+#   bash scripts/submit_training.sh [CONFIG] [ENV_DIR...]
+#   # default:    configs/rl/laguna-xs2.toml  environments/code_smoke           (MBPP code-repair)
+#   # read RL:    bash scripts/submit_training.sh configs/rl/laguna-read-gspo.toml environments/ocr_tool
+#   # curriculum: bash scripts/submit_training.sh configs/rl/laguna-curriculum.toml \
+#                   environments/ocr_tool environments/frontend_design
 #
-# Vendors the two pure laguna_rlvr helpers into the env dir so the hosted container is
-# self-contained (no extra install), pushes the env, then launches `prime train`. The vendored copy
-# is gitignored and removed on exit — committed source stays DRY.
-#
-# Uses the team's single free concurrent Laguna run slot. `prime train` will prompt to confirm.
+# For each env: vendors laguna_rlvr/{code_exec,rewards}.py in (self-contained for hosted training),
+# sanity-imports, and `prime env push`. Then launches `prime train CONFIG` once. Vendored copies are
+# gitignored and removed on exit. Uses the team's free Laguna run slot; `prime train` prompts to confirm.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ENV_DIR="${1:-environments/code_smoke}"
-CONFIG="${2:-configs/rl/laguna-xs2.toml}"
-VENDOR="$ENV_DIR/laguna_rlvr"
+CONFIG="${1:-configs/rl/laguna-xs2.toml}"
+shift || true
+ENV_DIRS=("$@")
+[ ${#ENV_DIRS[@]} -eq 0 ] && ENV_DIRS=("environments/code_smoke")
 
-cleanup() { rm -rf "$VENDOR"; }
+cleanup() { for d in "${ENV_DIRS[@]}"; do rm -rf "$d/laguna_rlvr"; done; }
 trap cleanup EXIT
 
-echo ">> Vendoring laguna_rlvr/{code_exec,rewards}.py into $ENV_DIR (self-contained for hosted training)"
-mkdir -p "$VENDOR"
-printf '"""Vendored at push time — minimal helpers for the hosted env."""\n' > "$VENDOR/__init__.py"
-cp src/laguna_rlvr/code_exec.py src/laguna_rlvr/rewards.py "$VENDOR/"
+for ENV_DIR in "${ENV_DIRS[@]}"; do
+  VENDOR="$ENV_DIR/laguna_rlvr"
+  echo ">> [$ENV_DIR] vendoring laguna_rlvr/{code_exec,rewards}.py (self-contained for hosted training)"
+  mkdir -p "$VENDOR"
+  printf '"""Vendored at push time — minimal helpers for the hosted env."""\n' > "$VENDOR/__init__.py"
+  cp src/laguna_rlvr/code_exec.py src/laguna_rlvr/rewards.py "$VENDOR/"
 
-echo ">> Sanity-checking the env imports from the vendored copy"
-( cd "$ENV_DIR" && python -c "
+  echo ">> [$ENV_DIR] sanity-checking the env imports from the vendored copy"
+  ( cd "$ENV_DIR" && python -c "
 import sys; sys.path.insert(0, '.')
 import laguna_rlvr.code_exec, laguna_rlvr.rewards  # noqa: F401
 print('   vendored laguna_rlvr imports OK')
 " )
 
-echo ">> Pushing env to the Hub from $ENV_DIR"
-prime env push --path "$ENV_DIR"
+  echo ">> [$ENV_DIR] pushing env to the Hub"
+  prime env push --path "$ENV_DIR"
+done
 
 echo ">> Launching free hosted Laguna RL run from $CONFIG"
 prime train "$CONFIG"

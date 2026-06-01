@@ -1,0 +1,25 @@
+# GSPO-style hosted RL of Laguna XS.2 on the READ + FRONTEND curriculum — the two capabilities that
+# fit tool-mediation with a verifiable reward: read (OCR tool, exact-match) and visual-code (DESIGN
+# tool, regex requirements checklist). Reasoning / grounding need native vision (the adapter), so they
+# are deliberately NOT here. `rollouts_per_example` > 1 = within-task reward variance = GSPO's signal,
+# run on Prime through `input_ids` (no inputs_embeds wrapper).
+#
+#   bash scripts/submit_training.sh configs/rl/laguna-curriculum.toml \
+#        environments/ocr_tool environments/frontend_design
+#   eval lift: prime eval run chaleong/ocr-tool -m poolside/laguna-xs.2   (and chaleong/frontend-design)
+model = "poolside/Laguna-XS.2"
+
+max_steps = 50
+batch_size = 64            # rollouts per step (hackathon cap: 128)
+rollouts_per_example = 8   # G=8 within-task reward variance — the group-relative (GSPO) signal
+learning_rate = 1e-5       # sparse verifiable rewards -> smaller steps than code_smoke's 1e-4
+
+[sampling]
+max_tokens = 1024
+enable_thinking = false    # non-thinking for agentic tool-use training
+
+[[env]]
+id = "chaleong/ocr-tool"          # READ — call OCR tool, answer a targeted field (exact-match reward)
+
+[[env]]
+id = "chaleong/frontend-design"   # VISUAL-CODE — read a mockup via DESIGN tool, write HTML (checklist reward)
