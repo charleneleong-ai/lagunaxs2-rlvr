@@ -15,6 +15,7 @@ from datasets import Dataset
 
 from laguna_rlvr.code_exec import extract_code, message_text   # vendor before any Hub push
 from laguna_rlvr.rewards import RolloutState, binary, shaped
+from laguna_rlvr.scaffold import Tool, parse_call, render_instructions, resolve_format
 
 # (mockup_id, design_spec, [(requirement_label, regex)]) — regexes checked case-insensitively on the markup.
 _BUILTIN_DESIGNS = [
@@ -70,7 +71,8 @@ _BUILTIN_DESIGNS = [
       ("'Create Account' button", r"<button[^>]*>[^<]*create account")]),
 ]
 
-_DESIGN_RE = re.compile(r"DESIGN:\s*(\S+)", re.I)
+# read_design is a scaffold tool (its call-syntax varies per harness); the HTML deliverable stays a code block.
+_TOOLS = [Tool("read_design", "mockup_id", "returns the design spec the OCR encoder reads")]
 
 
 def score_markup(html: str, labels: list[str], patterns: list[str]) -> list[str]:
@@ -78,21 +80,23 @@ def score_markup(html: str, labels: list[str], patterns: list[str]) -> list[str]
     return [label for label, pat in zip(labels, patterns) if not re.search(pat, html, re.I | re.S)]
 
 
-def _prompt(mockup_id: str) -> str:
+def _prompt(mockup_id: str, fmt: str) -> str:
     return (f"You are a frontend engineer. Implement the UI design in '{mockup_id}' as a single HTML "
             f"document (inline CSS is fine). You cannot see the image directly.\n\n"
-            f"Tools, one per line:\n  DESIGN: {mockup_id}   — returns the design spec the OCR encoder reads\n\n"
+            f"{render_instructions(_TOOLS, fmt)}\n\n"
             "Read the design first, then reply with an ```html code block. You'll get a list of any unmet "
             "requirements — fix them and resend the block until all pass.")
 
 
 class FrontendDesignEnv(vf.MultiTurnEnv):
-    def __init__(self, designs, *, max_turns: int, efficiency_weight: float, **kwargs):
+    def __init__(self, designs, *, max_turns: int, efficiency_weight: float, scaffold: str, **kwargs):
         self._eff_w = efficiency_weight
-        rows = [{"question": _prompt(mid), "answer": "",
-                 "info": {"mockup_id": mid, "spec": spec,
-                          "labels": [r[0] for r in reqs], "patterns": [r[1] for r in reqs]}}
-                for mid, spec, reqs in designs]
+        rows = []
+        for i, (mid, spec, reqs) in enumerate(designs):
+            fmt = resolve_format(i, scaffold)
+            rows.append({"question": _prompt(mid, fmt), "answer": "",
+                         "info": {"mockup_id": mid, "spec": spec, "fmt": fmt,
+                                  "labels": [r[0] for r in reqs], "patterns": [r[1] for r in reqs]}})
         super().__init__(eval_dataset=Dataset.from_list(rows),
                          rubric=vf.Rubric(funcs=[self._reward, self._success], weights=[1.0, 0.0]),
                          max_turns=max_turns, message_type="chat", **kwargs)
@@ -120,11 +124,7 @@ class FrontendDesignEnv(vf.MultiTurnEnv):
     async def env_response(self, messages, state, **kwargs):
         text = message_text(messages[-1])
         info = state["info"]
-        if "```" not in text and (m := _DESIGN_RE.search(text)):
-            mid = m.group(1).strip().strip(".,'\"")
-            spec = info["spec"] if mid == info["mockup_id"] else f"(no design named '{mid}')"
-            return [{"role": "user", "content": f"[design {mid}]\n{spec}\n\nNow reply with an ```html block."}]
-        if "```" in text:
+        if "```" in text:   # submitting the HTML deliverable
             unmet = score_markup(extract_code(text), info["labels"], info["patterns"])
             state["passed"] = len(info["labels"]) - len(unmet)
             if not unmet:
@@ -132,8 +132,16 @@ class FrontendDesignEnv(vf.MultiTurnEnv):
                 return [{"role": "user", "content": "✅ All requirements met."}]
             return [{"role": "user", "content": "Unmet requirements:\n" + "\n".join(f"- {u}" for u in unmet) +
                      "\nFix and resend the ```html block."}]
-        return [{"role": "user", "content": "Read the design with `DESIGN: <mockup_id>`, then send an ```html block."}]
+        if (call := parse_call(text, info["fmt"], _TOOLS)):   # read_design tool call (any scaffold syntax)
+            mid = call[1]
+            spec = info["spec"] if mid == info["mockup_id"] else f"(no design named '{mid}')"
+            return [{"role": "user", "content": f"[design {mid}]\n{spec}\n\nNow reply with an ```html block."}]
+        return [{"role": "user", "content": "Read the design, then send an ```html block.\n"
+                 + render_instructions(_TOOLS, info["fmt"])}]
 
 
-def load_environment(max_turns: int = 5, efficiency_weight: float = 0.1, **kwargs) -> vf.Environment:
-    return FrontendDesignEnv(_BUILTIN_DESIGNS, max_turns=max_turns, efficiency_weight=efficiency_weight)
+def load_environment(max_turns: int = 5, efficiency_weight: float = 0.1,
+                     scaffold: str = "mixed", **kwargs) -> vf.Environment:
+    """scaffold: 'line' | 'xml' | 'json' | 'poolside' (read_design call syntax) or 'mixed' (round-robin)."""
+    return FrontendDesignEnv(_BUILTIN_DESIGNS, max_turns=max_turns, efficiency_weight=efficiency_weight,
+                             scaffold=scaffold)

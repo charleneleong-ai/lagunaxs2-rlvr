@@ -19,6 +19,8 @@ from datasets import Dataset
 
 from laguna_rlvr.code_exec import message_text   # vendor before any Hub push
 from laguna_rlvr.rewards import RolloutState, binary, shaped
+from laguna_rlvr.scaffold import (Tool, parse_call, parse_native, render_instructions,
+                                  resolve_format, to_tool_defs)
 
 # (image_id, document_text, question, answer) — multi-field docs so answering needs parsing, not echo.
 _BUILTIN_DOCS = [
@@ -36,18 +38,11 @@ _BUILTIN_DOCS = [
      "What is the Member ID on form.png?", "MX-88231"),
 ]
 
-_PROTOCOL = (
-    "You are given a task about a document IMAGE you cannot see directly. You have one tool:\n"
-    "  OCR: <image_id>   — returns the text an OCR encoder extracts from that image.\n\n"
-    "Each turn reply with EXACTLY ONE line, either:\n"
-    "  OCR: <image_id>     to read the document, or\n"
-    "  ANSWER: <value>     once you know the answer (just the value)."
-)
-
+# OCR-as-tool + answer modeled as tools, so the scaffold can render/parse the call in any syntax.
+_TOOLS = [Tool("ocr", "image_id", "returns the text an OCR encoder extracts from that image"),
+          Tool("answer", "value", "submit your final answer — just the value")]
 
 _NORM_RE = re.compile(r"[\s$,]")
-_ANSWER_RE = re.compile(r"ANSWER:\s*(.+)", re.I)
-_OCR_RE = re.compile(r"OCR:\s*(\S+)", re.I)
 
 
 def _norm(s: str) -> str:
@@ -74,10 +69,18 @@ def ocr(image_id: str, images: dict[str, str]) -> str:
 
 
 class OCRToolEnv(vf.MultiTurnEnv):
-    def __init__(self, docs, *, max_turns: int, efficiency_weight: float, **kwargs):
+    def __init__(self, docs, *, max_turns: int, efficiency_weight: float, scaffold: str, **kwargs):
         self._eff_w = efficiency_weight
-        rows = [{"question": f"{_PROTOCOL}\n\nTask: {q}", "answer": a,
-                 "info": {"image_id": iid, "text": txt, "answer": a}} for iid, txt, q, a in docs]
+        rows = []
+        for i, (iid, txt, q, a) in enumerate(docs):
+            fmt = resolve_format(i, scaffold)
+            instr = ("Use the available tools to read the image, then answer." if fmt == "native"
+                     else render_instructions(_TOOLS, fmt))
+            question = f"You have a task about a document IMAGE you cannot see directly.\n\nTask: {q}\n\n{instr}"
+            rows.append({"question": question, "answer": a,
+                         "info": {"image_id": iid, "text": txt, "answer": a, "fmt": fmt}})
+        if scaffold == "native":   # advertise structured tool schemas to the sampler
+            kwargs.setdefault("tool_defs", to_tool_defs(_TOOLS))
         super().__init__(eval_dataset=Dataset.from_list(rows),
                          rubric=vf.Rubric(funcs=[self._reward, self._success], weights=[1.0, 0.0]),
                          max_turns=max_turns, message_type="chat", **kwargs)
@@ -104,20 +107,24 @@ class OCRToolEnv(vf.MultiTurnEnv):
         return bool(state.get("done"))
 
     async def env_response(self, messages, state, **kwargs):
-        text = message_text(messages[-1])
-        info = state["info"]
-        if (ans := _ANSWER_RE.search(text)):
-            state["solved"] = _match(info["answer"], ans.group(1))
+        info, last = state["info"], messages[-1]
+        call = (parse_native(last, _TOOLS) if info["fmt"] == "native"
+                else parse_call(message_text(last), info["fmt"], _TOOLS))
+        if call is None:
+            hint = ("Call one of the available tools." if info["fmt"] == "native"
+                    else render_instructions(_TOOLS, info["fmt"]))
+            return [{"role": "user", "content": "No valid tool call found.\n" + hint}]
+        name, value = call
+        if name == "answer":
+            state["solved"] = _match(info["answer"], value)
             state["done"] = True
             return [{"role": "user", "content": "✅ Correct." if state["solved"] else "❌ Incorrect."}]
-        if (call := _OCR_RE.search(text)):
-            image_id = call.group(1).strip().strip(".,'\"")
-            extracted = ocr(image_id, {info["image_id"]: info["text"]})
-            return [{"role": "user", "content": f"[OCR of {image_id}]\n{extracted}\n\n"
-                     "Now reply 'OCR: <image_id>' or 'ANSWER: <value>'."}]
-        return [{"role": "user", "content": "Reply with exactly one line: "
-                 "'OCR: <image_id>' or 'ANSWER: <value>'."}]
+        extracted = ocr(value, {info["image_id"]: info["text"]})
+        return [{"role": "user", "content": f"[ocr of {value}]\n{extracted}\n\nNow call a tool."}]
 
 
-def load_environment(max_turns: int = 4, efficiency_weight: float = 0.1, **kwargs) -> vf.Environment:
-    return OCRToolEnv(_BUILTIN_DOCS, max_turns=max_turns, efficiency_weight=efficiency_weight)
+def load_environment(max_turns: int = 4, efficiency_weight: float = 0.1,
+                     scaffold: str = "mixed", **kwargs) -> vf.Environment:
+    """scaffold: 'line'|'xml'|'json'|'poolside' (text syntax) · 'mixed' (round-robin) · 'native' (structured tool_calls)."""
+    return OCRToolEnv(_BUILTIN_DOCS, max_turns=max_turns, efficiency_weight=efficiency_weight,
+                      scaffold=scaffold)
