@@ -95,6 +95,17 @@ class _Mixture(Dataset):
 _DEFAULT_MIX = [("websight", 0.45), ("webcode2m", 0.25),  # chartmimic dropped: label is a filename,
                 ("swebench_mm", 0.1), ("synthetic", 0.2)]  # not code -> no extractable title needle
 
+# Stage-1 projector-ALIGNMENT mix (objective=recon, projector-only): teach the connector to emit
+# tokens the frozen LLM will copy TEXT from, before any task tuning — the reference's LLaVA-Pretrain
+# step, but text-rich since we're graded on reading (see docs/specs/sft-scale-up-vs-reference.md). The
+# transcribe probe (2026-06-02) showed our tokens barely steer the decoder at 2k examples; this is the
+# fix, at scale. `synthetic` (SyntheticOCR) is the core — it's generated (free, arbitrary scale) and
+# its recon target IS the visible text, so it directly teaches glyph copy. `websight` is a minority
+# real-image grounding slice (its recon target is HTML, not reading, so kept small — a code-heavy mix
+# erodes readout, caught 2026-05). Real-doc OCR transcription (pixparse/idl-wds, pdfa-eng-wds), TextCaps,
+# and LLaVAR are the next text-rich adds once wired — they'd raise the real-image share above websight.
+_ALIGN_MIX = [("synthetic", 0.8), ("websight", 0.2)]
+
 REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "synthetic": _synthetic,
     "swebench_mm": _swebench_mm,
@@ -103,7 +114,7 @@ REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "chartmimic": _chartmimic,
     "design2code": _design2code,  # eval-only fixed held-out ranker (don't train on it)
 }
-CHOICES = [*REGISTRY, "mix"]
+CHOICES = [*REGISTRY, "mix", "align"]
 
 # Code "kind" of each corpus's targets, for code-validity metrics; corpora absent here aren't scored.
 CORPUS_KIND = {"websight": "html", "webcode2m": "html", "design2code": "html", "chartmimic": "python"}
@@ -214,6 +225,8 @@ def parse_mixture(spec: str) -> list[tuple[str, float]]:
 def build_corpus(name: str, n: int, mixture: list[tuple[str, float]] | None = None) -> Dataset:
     if name == "mix":
         return _Mixture(mixture or _DEFAULT_MIX, n)
+    if name == "align":  # Stage-1 text-rich projector-alignment mix (override weights via --mixture)
+        return _Mixture(mixture or _ALIGN_MIX, n)
     if name not in REGISTRY:
         raise ValueError(f"unknown dataset {name!r}; choices: {', '.join(CHOICES)}")
     return REGISTRY[name](n)
