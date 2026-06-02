@@ -53,6 +53,15 @@ def _design2code(n: int) -> Dataset:
     return Design2Code(n=n)  # EVAL ONLY (held-out external ranker) — never put in the training mix
 
 
+def _cauldron(config: str) -> Callable[[int], Dataset]:
+    """Builder for a `HuggingFaceM4/the_cauldron` config as an (image, transcription) recon corpus —
+    real-image text-rich supervision for Stage-1 (the realism upgrade over generated SyntheticOCR)."""
+    def build(n: int) -> Dataset:
+        from laguna_rlvr.visual.hf_image_text import CauldronDataset
+        return CauldronDataset(config, n=n)
+    return build
+
+
 class _Mixture(Dataset):
     """Weighted blend of corpora for full training — builds ~n×weight examples from each and
     concatenates them into one indexable dataset, so the model sees the corpora interleaved (the
@@ -99,12 +108,12 @@ _DEFAULT_MIX = [("websight", 0.45), ("webcode2m", 0.25),  # chartmimic dropped: 
 # tokens the frozen LLM will copy TEXT from, before any task tuning — the reference's LLaVA-Pretrain
 # step, but text-rich since we're graded on reading (see docs/specs/sft-scale-up-vs-reference.md). The
 # transcribe probe (2026-06-02) showed our tokens barely steer the decoder at 2k examples; this is the
-# fix, at scale. `synthetic` (SyntheticOCR) is the core — it's generated (free, arbitrary scale) and
-# its recon target IS the visible text, so it directly teaches glyph copy. `websight` is a minority
-# real-image grounding slice (its recon target is HTML, not reading, so kept small — a code-heavy mix
-# erodes readout, caught 2026-05). Real-doc OCR transcription (pixparse/idl-wds, pdfa-eng-wds), TextCaps,
-# and LLaVAR are the next text-rich adds once wired — they'd raise the real-image share above websight.
-_ALIGN_MIX = [("synthetic", 0.8), ("websight", 0.2)]
+# fix, at scale. Reading-dominant (0.8): `synthetic` (SyntheticOCR — generated, free, exact visible-text
+# targets, the glyph-copy core) + `cauldron_rendered_text` (REAL rendered-text transcription from
+# the_cauldron — the realism hedge over pure synthetic). `websight` is a minority real-image grounding
+# slice (recon target is HTML, not reading, so kept small — a code-heavy mix erodes readout, 2026-05).
+# Next text-rich adds: pixparse/idl-wds + pdfa-eng-wds (real-doc OCR), the_cauldron iam/textcaps, LLaVAR.
+_ALIGN_MIX = [("synthetic", 0.6), ("cauldron_rendered_text", 0.2), ("websight", 0.2)]
 
 REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "synthetic": _synthetic,
@@ -113,6 +122,10 @@ REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "webcode2m": _webcode2m,
     "chartmimic": _chartmimic,
     "design2code": _design2code,  # eval-only fixed held-out ranker (don't train on it)
+    # the_cauldron text-rich transcription configs — real-image reading supervision for Stage-1.
+    "cauldron_rendered_text": _cauldron("rendered_text"),  # rendered text -> transcription
+    "cauldron_textcaps": _cauldron("textcaps"),            # reading-aware image captions
+    "cauldron_iam": _cauldron("iam"),                      # handwriting transcription
 }
 CHOICES = [*REGISTRY, "mix", "align"]
 

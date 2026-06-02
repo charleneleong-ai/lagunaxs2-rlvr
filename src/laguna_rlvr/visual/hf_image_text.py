@@ -78,6 +78,40 @@ class HFImageTextDataset(Dataset):
         return row["image"], row["text"]
 
 
+class CauldronDataset(Dataset):
+    """(image, transcription) pairs from a `HuggingFaceM4/the_cauldron` config — a curated 50-set VLM
+    collection. Rows are `{images: [PIL], texts: [{user, assistant, source}, ...]}`; we take the first
+    image and the first turn's `assistant` as the recon target. Text-rich transcription/caption configs
+    (rendered_text, iam, textcaps) give REAL-image reading supervision for Stage-1 alignment — the
+    realism upgrade over SyntheticOCR. Same streaming + disk cache as HFImageTextDataset."""
+
+    def __init__(self, config: str, *, split: str = "train", n: int = 2000, offset: int = 0,
+                 max_text_chars: int = 2048):
+        key = "cauldron__" + "__".join(str(p) for p in (config, split, n, offset, max_text_chars))
+        self._ds = _cached_or_stream(key, lambda: self._stream(config, split, n, offset, max_text_chars))
+
+    @staticmethod
+    def _stream(config, split, n, offset, max_text_chars) -> HFDataset:
+        stream = load_dataset("HuggingFaceM4/the_cauldron", config, split=split, streaming=True)
+        imgs, txts = [], []
+        for row in track(islice(stream, offset, offset + n), total=n, description=f"cauldron/{config} ({n})"):
+            images, texts = row.get("images"), row.get("texts")
+            if images and texts and texts[0].get("assistant"):
+                imgs.append(images[0].convert("RGB"))
+                txts.append(texts[0]["assistant"][:max_text_chars])
+        if not imgs:
+            raise RuntimeError(f"no usable rows from the_cauldron/{config}")
+        return HFDataset.from_dict({"image": imgs, "text": txts},
+                                   features=Features({"image": HFImage(), "text": Value("string")}))
+
+    def __len__(self) -> int:
+        return len(self._ds)
+
+    def __getitem__(self, i: int):
+        row = self._ds[i]
+        return row["image"], row["text"]
+
+
 class VQADataset(Dataset):
     """(image, question, answer) triples from a VQA set (TextVQA/DocVQA): embedded image + a
     per-example question + a list of annotator answers (majority vote). The answer is short, diverse
