@@ -268,15 +268,21 @@ class VisualAdapter(nn.Module):
         ratio = vis.flatten(0, 1).float().norm(dim=-1).mean() / self._emb_norm_median
         return self.norm_penalty * (ratio - 1.0).clamp(min=0) ** 2
 
-    def _project(self, images: list, anchor: bool | None = None) -> torch.Tensor:
+    def _project(self, images: list, anchor: bool | None = None,
+                 feats: torch.Tensor | None = None) -> torch.Tensor:
         # Encode + resample each image individually, then stack the fixed-size (Nv, D) outputs. NaFlex
         # emits a variable patch count per image, so raw encoder features can't be stacked into one batch
         # pre-resampler (crashes on the heterogeneous Stage-2 mix via transcribe/_log_predictions). The
         # resampler folds N -> fixed Nv, so the per-image outputs ARE uniform and stack cleanly. AnyRes
         # (fixed N) works identically; _project runs at micro_batch=1 in training, batched only at eval.
-        dev, dt = self.llm.device, self.llm.dtype
-        vis = torch.cat([self.projector(self.encoder.encode([img]).to(device=dev, dtype=dt))
-                         for img in images], dim=0)  # (B, Nv, D)
+        # `feats` lets a caller reuse cached frozen-encoder output (GSPO micro-chunk: projector recomputed
+        # per chunk over constant feats, no re-encode); None -> encode here per-image as above.
+        if feats is not None:
+            vis = self.projector(feats)  # (B, Nv, D)
+        else:
+            dev, dt = self.llm.device, self.llm.dtype
+            vis = torch.cat([self.projector(self.encoder.encode([img]).to(device=dev, dtype=dt))
+                             for img in images], dim=0)  # (B, Nv, D)
         return self._anchor(vis) if (self.use_anchor if anchor is None else anchor) else vis
 
     @torch.no_grad()
