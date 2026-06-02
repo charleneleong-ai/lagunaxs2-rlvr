@@ -26,8 +26,9 @@ from torch.utils.data import DataLoader, Dataset
 from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
 from laguna_rlvr.visual.corpora import (CHOICES, DEFAULT_VQA, QASFTDataset, build_corpus, load_vqa,
-                                        parse_mixture)
-from laguna_rlvr.visual.multiturn_qa import dataset_qa_accuracy
+                                        parse_mixture, read_question)
+from laguna_rlvr.visual.multiturn_qa import (_RECALL_Q, dataset_qa_accuracy, evaluate_multiturn_qa,
+                                             image_fetcher, mixture_episodes)
 from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.hf_image_text import HFImageTextDataset
@@ -101,8 +102,6 @@ def _log_samples(run, ds: Dataset, key: str, n: int = 8) -> None:
 def _log_qa_samples(run, n: int = 4) -> None:
     """Log example multi-turn multimodal QA episodes (the target task: read A, read B, recall A) as a
     W&B table, so the qa/metrics/* probe is inspectable next to its scores."""
-    from laguna_rlvr.visual.corpora import read_question
-    from laguna_rlvr.visual.multiturn_qa import _RECALL_Q, image_fetcher, mixture_episodes
     eps = mixture_episodes(n, per_corpus=16)
     if not eps:
         return
@@ -366,8 +365,6 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                     run.log({"eval/loss/total": eval_loss, "eval/metrics/embed_norm_ratio": drift, **ocr}, step=step)
                     _log_predictions(run, adapter, ocr_probe, "eval/samples", step)
             if qa_eval:  # single-turn read accuracy (per corpus) + multi-turn cross-turn recall
-                from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
-
                 qa = dataset_qa_accuracy(adapter, qa_eval_items)  # the target metric (incl. VQA/synthetic)
                 qa_acc = qa["qa/metrics/accuracy"]
                 per_c = "  ".join(f"{k.rsplit('_', 1)[1]} {v:.2f}" for k, v in qa.items() if "/acc_" in k)
