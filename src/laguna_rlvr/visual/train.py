@@ -180,10 +180,14 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     n_val = min(max(1, len(full) // 10), 256)  # 90/10 split, capped so frequent val stays cheap
     train_ds, val_ds = torch.utils.data.random_split(
         full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
-    loader = DataLoader(train_ds, batch_size=plan.micro_batch_size, shuffle=True, collate_fn=_collate)
-    val_loader = DataLoader(val_ds, batch_size=plan.micro_batch_size, shuffle=False, collate_fn=_collate)
-    eval_loader = (DataLoader(build_corpus(eval_dataset, 128), batch_size=plan.micro_batch_size,
-                              shuffle=False, collate_fn=_collate) if eval_dataset else None)  # fixed ext. eval
+    # Parallel per-step data loading so the GPU isn't fed single-process (util starves otherwise). The
+    # heavy vision-encode runs in the train step (GPU-side), so workers mainly parallelize PIL decode +
+    # collate -> modest but real. persistent_workers keeps them alive across the frequent val/eval passes.
+    dl = dict(batch_size=plan.micro_batch_size, collate_fn=_collate, num_workers=4,
+              pin_memory=True, persistent_workers=True)
+    loader = DataLoader(train_ds, shuffle=True, **dl)
+    val_loader = DataLoader(val_ds, shuffle=False, **dl)
+    eval_loader = DataLoader(build_corpus(eval_dataset, 128), shuffle=False, **dl) if eval_dataset else None
     val_every = max(50, min(max_steps // 10, 500))  # loss/early-stop cadence (bounded for high ceilings)
     gen_every = val_every * 3  # generation metrics (WER/CER) are slow -> coarser cadence than loss val
     wer_items = [val_ds[i] for i in range(min(16, len(val_ds)))]  # fixed subset for WER/CER (generation)
