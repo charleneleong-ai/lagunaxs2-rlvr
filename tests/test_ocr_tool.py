@@ -36,29 +36,43 @@ class TestOCRBackend:
         assert "no image" in ocr_tool.ocr("wrong.png", {"invoice.png": "Total: $5"})
 
 
+from scaffold_emit import emit_call as _toolcall   # noqa: E402
+
+
 class TestEnv:
-    def test_builtin_rows_hide_answer_behind_image(self):
-        env = ocr_tool.load_environment()
+    def test_builtin_rows_hide_answer_and_mix_scaffolds(self):
+        env = ocr_tool.load_environment(scaffold="mixed")
         rows = env.eval_dataset.to_list()
         assert len(rows) == len(ocr_tool._BUILTIN_DOCS)
         for row in rows:
             # The answer must NOT be readable from the prompt — it lives only in the OCR-able doc.
             assert ocr_tool._norm(row["info"]["answer"]) not in ocr_tool._norm(row["question"])
             assert row["info"]["text"], "doc text needed for the ocr tool"
+        assert len({r["info"]["fmt"] for r in rows}) >= 2, "'mixed' must vary the scaffold across rows"
 
-    def test_ocr_then_correct_answer_solves(self):
-        env = ocr_tool.load_environment()
-        state = {"info": {"image_id": "invoice.png", "text": "Total Due: $42.50", "answer": "42.50"},
-                 "turn": 1}
+    @pytest.mark.parametrize("fmt", ["line", "xml", "json", "poolside"])
+    def test_ocr_then_answer_solves_in_each_scaffold(self, fmt):
+        env = ocr_tool.load_environment(scaffold=fmt)
+        state = {"info": {"image_id": "invoice.png", "text": "Total Due: $42.50",
+                          "answer": "42.50", "fmt": fmt}, "turn": 1}
         asyncio.run(env.setup_state(state))
-        obs = asyncio.run(env.env_response([{"role": "assistant", "content": "OCR: invoice.png"}], state))
+        obs = asyncio.run(env.env_response(
+            [{"role": "assistant", "content": _toolcall(fmt, "ocr", "image_id", "invoice.png")}], state))
         assert "42.50" in obs[0]["content"] and not state["done"]
-        asyncio.run(env.env_response([{"role": "assistant", "content": "ANSWER: 42.50"}], state))
+        asyncio.run(env.env_response(
+            [{"role": "assistant", "content": _toolcall(fmt, "answer", "value", "42.50")}], state))
         assert state["solved"] and state["done"]
 
     def test_wrong_answer_is_done_but_unsolved(self):
-        env = ocr_tool.load_environment()
-        state = {"info": {"image_id": "x.png", "text": "Total: $9", "answer": "9"}, "turn": 1}
+        env = ocr_tool.load_environment(scaffold="line")
+        state = {"info": {"image_id": "x.png", "text": "Total: $9", "answer": "9", "fmt": "line"}, "turn": 1}
         asyncio.run(env.setup_state(state))
-        asyncio.run(env.env_response([{"role": "assistant", "content": "ANSWER: 42"}], state))
+        asyncio.run(env.env_response([{"role": "assistant", "content": "answer: 42"}], state))
         assert state["done"] and not state["solved"]
+
+    def test_unparseable_reprompts_without_terminating(self):
+        env = ocr_tool.load_environment(scaffold="line")
+        state = {"info": {"image_id": "x.png", "text": "Total: $9", "answer": "9", "fmt": "line"}, "turn": 1}
+        asyncio.run(env.setup_state(state))
+        obs = asyncio.run(env.env_response([{"role": "assistant", "content": "hmm let me think"}], state))
+        assert not state["done"] and "tool" in obs[0]["content"].lower()
