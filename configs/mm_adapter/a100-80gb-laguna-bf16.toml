@@ -1,9 +1,13 @@
-# Projector-only visual-context training on one A100 80GB — the honest current setup.
-# Unquantized BF16 Laguna XS.2 (~67GB) frozen, GLM-OCR encoder frozen, train the projector only.
-# The NVFP4/FP8/INT4 checkpoints store MoE experts as per-expert packed Linears that don't load into
-# this modeling revision's fused expert params (they init random) — so we use the BF16 base, which
-# fits an 80GB A100 with headroom. The 40GB-NVFP4 scaffold lives in a100-40gb-projector.toml.
-name = "laguna-xs2-glm-ocr-visual-context-bf16"
+# Stage-2 QA-SFT + attention-LoRA on one A100 80GB (micro_batch=1; the micro_batch=2 batched-forward
+# variant is a100-80gb-laguna-bf16-microbatch2.toml). Unquantized BF16 Laguna XS.2 (~67GB) frozen,
+# SigLIP2-NaFlex encoder frozen, train the resampler projector + attention LoRA. (NVFP4/FP8/INT4
+# checkpoints store MoE experts as packed per-expert Linears that don't load into this modeling
+# revision's fused params — they init random — so we use the BF16 base, which fits 80GB with headroom.
+# The 40GB-NVFP4 scaffold is a100-40gb-projector.toml.)
+# The modality/adapter knobs mirror the launch flags and document the run; train.py reads
+# micro_batch_size, gradient_accumulation_steps, max_steps, learning_rate, the backbone, mixture, and
+# guardrails. Stage-1 alignment reuses this config but overrides --objective recon --unfreeze "" at the CLI.
+name = "laguna-xs2-siglip2naflex-qasft-lora-bf16"
 
 [backbone]
 model_id = "poolside/Laguna-XS.2"
@@ -13,24 +17,24 @@ freeze = true
 max_sequence_length = 8192
 
 [modality]
-kind = "document_image"
-encoder_id = "zai-org/GLM-OCR"
-encoder_role = "ocr_context_encoder"
+kind = "screenshot_image"
+encoder_id = "google/siglip2-so400m-patch16-naflex"   # --encoder siglip_naflex (native variable-res, no tiling)
+encoder_role = "vision_encoder"
 fallback_encoder_id = "google/siglip2-base-patch16-naflex"
 freeze_encoder = true
 
 [adapter]
-kind = "ocr_context_projector"
-objective = "optical_context_reconstruction"
+kind = "resampler_projector"        # --projector resampler: Perceiver resampler -> 256 vision tokens
+objective = "qa_sft"                # --objective qa: masked CE on the needle answer, forces vision use
 train_projector = true
 
 [training]
-stage = "projector_sft"
+stage = "qa_sft_lora"               # --unfreeze lora: attention-only LoRA (q/k/v/o) on the frozen decoder
 micro_batch_size = 1
-gradient_accumulation_steps = 8   # more weight updates per forward than 16 (faster convergence, still smoothed)
-learning_rate = 0.0001
-max_steps = 1000
-lora_enabled = false
+gradient_accumulation_steps = 8     # more weight updates per forward than 16 (faster convergence, still smoothed)
+learning_rate = 0.00002             # --lr 2e-5 (the Stage-2 / reference LR)
+max_steps = 3000
+lora_enabled = true
 
 [gpu_guardrails]
 max_vram_gb = 80
@@ -41,6 +45,5 @@ reserve_vram_gb = 6
 # (scripts/mixture_sweep.py) and pick by held-out val rather than trust these numbers.
 # synthetic (SyntheticOCR) is the OCR anchor: a kind=None transcription target that keeps the
 # projector's readout from collapsing into the code objective (the lqe323t4 OCR-starvation). Required.
-# chartmimic dropped: its HF label is a filename, not the code -> extract_needle finds no title
-# (0 QA supervision + unjudgeable chart eval). Its 0.1 goes to synthetic (clean visible-text OCR).
+# chartmimic dropped: its HF label is a filename, not the code -> extract_needle finds no title.
 weights = { websight = 0.45, webcode2m = 0.25, swebench_mm = 0.1, synthetic = 0.2 }
