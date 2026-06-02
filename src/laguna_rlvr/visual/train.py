@@ -162,9 +162,16 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             use_anchor=use_anchor, norm_penalty=norm_penalty)
     opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
 
-    # Mixture weights: --mixture overrides the config's [mixture].weights, which overrides _DEFAULT_MIX.
-    mix_specs = parse_mixture(mixture) if mixture else [
-        (k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
+    # Mixture weights: explicit --mixture always wins. Otherwise the config's [mixture].weights is the
+    # prior for `--dataset mix` ONLY — `align` (and any other named dataset) carries its own built-in
+    # mix (_ALIGN_MIX), so the config's mix weights must NOT bleed into it (else --dataset align silently
+    # runs the code-heavy default mix and erodes readout — caught 2026-06-02).
+    if mixture:
+        mix_specs = parse_mixture(mixture)
+    elif dataset == "mix":
+        mix_specs = [(k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
+    else:
+        mix_specs = None
     full = build_corpus(dataset, n_train, mixture=mix_specs)
     if objective == "qa":  # QA-SFT: (image, answer, corpus, question) from needle rows + VQA reading sets
         from laguna_rlvr.visual.corpora import DEFAULT_VQA, QASFTDataset, load_vqa
