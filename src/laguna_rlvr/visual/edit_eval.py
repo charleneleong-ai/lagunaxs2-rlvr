@@ -10,10 +10,12 @@ what we're building toward, dispatched on language exactly as a coding model sho
 """
 from __future__ import annotations
 
+import ast
 import random
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from html.parser import HTMLParser
 
 from laguna_rlvr.visual.corpora import CORPUS_KIND
 from laguna_rlvr.visual.model import IMAGE_TOKEN, Turn, VisualAdapter
@@ -46,7 +48,6 @@ def _html_mutate(code: str, rng: random.Random) -> tuple[str, str, str] | None:
 
 
 def _html_validate(code: str) -> bool:
-    from html.parser import HTMLParser
     try:
         HTMLParser().feed(code)
     except Exception:
@@ -62,7 +63,6 @@ def _py_mutate(code: str, rng: random.Random) -> tuple[str, str, str] | None:
 
 
 def _py_validate(code: str) -> bool:
-    import ast
     try:
         ast.parse(code)
         return True

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -193,8 +194,6 @@ def dataset_qa_accuracy(adapter: VisualAdapter, items: list, max_new_tokens: int
     """Single-turn read accuracy over QASFTDataset val items (image, answer, corpus, question) — scores
     the ACTUAL training distribution (incl. webcode2m visible-H1 / SyntheticOCR / the VQA suite), broken
     down per corpus, rather than a fixed websight-heavy manifest. Substring match (replies are verbose)."""
-    from collections import defaultdict
-
     per_corpus: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for img, answer, corpus, question in items:
         q = question or read_question(CORPUS_KIND.get(corpus))
