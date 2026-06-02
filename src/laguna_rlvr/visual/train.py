@@ -142,7 +142,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           eval_dataset: str = "", patience: int = 3, min_delta: float = 1e-3,
           qa_eval: bool = True, description: str = "", init_projector: str = "",
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
-          lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0) -> Path:
+          lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0,
+          qa_eval_n: int = 40) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -192,7 +193,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     gen_every = val_every * 3  # generation metrics (WER/CER) are slow -> coarser cadence than loss val
     wer_items = [val_ds[i] for i in range(min(16, len(val_ds)))]  # fixed subset for WER/CER (generation)
     # fixed val sample for full-distribution QA-read accuracy (incl. VQA/synthetic, per corpus)
-    qa_eval_items = [val_ds[i] for i in range(min(40, len(val_ds)))] if objective == "qa" else []
+    qa_eval_items = [val_ds[i] for i in range(min(qa_eval_n, len(val_ds)))] if objective == "qa" else []
     # Inline reading probe for non-QA objectives (recon Stage-1): a fixed REAL-VQA sample, independent
     # of the (synthetic-heavy) train mix, so we watch real-image reading TRANSFER live each eval rather
     # than stop-and-eval. Observational only — logged under read/, never drives val selection. Built
@@ -441,10 +442,11 @@ def main(
     lr: float = typer.Option(None, help="override the config learning rate"),
     vqa: str = typer.Option("default", help="VQA reading sets for QA-SFT: 'default'=all, comma-list, or '' = none"),
     norm_penalty: float = typer.Option(0.0, help="soft cap on projected-token scale (--no-anchor ballooning)"),
+    qa_eval_n: int = typer.Option(40, help="# val items scored for qa_acc each eval (bigger = less noisy, slower)"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective, unfreeze, anchor, lr, vqa, norm_penalty)
+          objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n)
 
 
 if __name__ == "__main__":
