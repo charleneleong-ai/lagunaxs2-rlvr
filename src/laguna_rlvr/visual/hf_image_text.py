@@ -102,6 +102,20 @@ def _vqa_rows(*, shard_idx, num_shards, per_shard, offset, repo, config, split, 
                 yield {"image": img.convert("RGB"), "question": q, "answer": a}
 
 
+def _screenspot_rows(*, shard_idx, num_shards, per_shard, offset, repo, split):
+    """Yield {image, locate-instruction, bbox-as-text} grounding rows — for from_generator."""
+    for i in shard_idx:
+        base = load_dataset(repo, split=split, streaming=True)
+        rows = islice(base.shard(num_shards, i), per_shard) if num_shards > 1 else \
+            islice(base, offset, offset + per_shard)
+        for row in track(rows, total=per_shard, description=f"{repo} shard {i}"):
+            img, instr, box = row.get("image"), row.get("instruction"), row.get("bbox")
+            if img is not None and instr and box and len(box) == 4:
+                yield {"image": img.convert("RGB"),
+                       "question": f"Locate the UI element for '{instr}'. Give its bounding box as [x1, y1, x2, y2] in 0-1.",
+                       "answer": "[" + ", ".join(f"{c:.3f}" for c in box) + "]"}
+
+
 class HFImageTextDataset(Dataset):
     """(screenshot, code) pairs streamed from an HF dataset (embedded image + text), cached to disk."""
 
@@ -216,19 +230,14 @@ class ScreenSpotDataset(Dataset):
 
     @staticmethod
     def _stream(repo, split, n, offset) -> HFDataset:
-        stream = load_dataset(repo, split=split, streaming=True)
-        imgs, qs, ans = [], [], []
-        for row in track(islice(stream, offset, offset + n), total=n, description=f"{repo} ({n})"):
-            img, instr, box = row.get("image"), row.get("instruction"), row.get("bbox")
-            if img is not None and instr and box and len(box) == 4:
-                imgs.append(img.convert("RGB"))
-                qs.append(f"Locate the UI element for '{instr}'. Give its bounding box as [x1, y1, x2, y2] in 0-1.")
-                ans.append("[" + ", ".join(f"{c:.3f}" for c in box) + "]")
-        if not imgs:
+        p = _shard_plan(n, offset)  # incremental + optional parallel (consistent with the other loaders)
+        ds = HFDataset.from_generator(
+            _screenspot_rows, features=_VQA_FEATURES, num_proc=p["num_proc"],
+            gen_kwargs=dict(shard_idx=p["shard_idx"], num_shards=p["num_shards"], per_shard=p["per_shard"],
+                            offset=p["offset"], repo=repo, split=split))
+        if len(ds) == 0:
             raise RuntimeError(f"no usable rows from {repo}")
-        return HFDataset.from_dict(
-            {"image": imgs, "question": qs, "answer": ans},
-            features=Features({"image": HFImage(), "question": Value("string"), "answer": Value("string")}))
+        return ds
 
     def __len__(self) -> int:
         return len(self._ds)
