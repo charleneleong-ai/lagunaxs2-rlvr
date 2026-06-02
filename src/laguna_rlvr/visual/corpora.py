@@ -95,6 +95,18 @@ class _Mixture(Dataset):
         img, txt = self._datasets[di][j]
         return img, txt, self._names[di]  # 3rd element tags the corpus for per-corpus loss logging
 
+    def text_labels(self) -> list[tuple[str, str]]:
+        """(text, corpus) per row WITHOUT decoding images — lets QASFTDataset filter needles cheaply.
+        Reads each HF-backed sub-dataset's text column directly (no image decode); only the few non-HF
+        corpora (synthetic/swebench) fall back to a per-row read."""
+        cols: dict[int, list | None] = {}
+        for di, _ in self._index:
+            if di not in cols:
+                ds = self._datasets[di]
+                cols[di] = ds._ds["text"] if hasattr(ds, "_ds") else None
+        return [(cols[di][j] if cols[di] is not None else self._datasets[di][j][1], self._names[di])
+                for di, j in self._index]
+
 
 # Default full-training mixture (WebSight-heavy; mirrors the corpus plan in the design doc). A
 # hand-set prior — sweep it (scripts/mixture_sweep.py) and pick by held-out val rather than trust it.
@@ -181,27 +193,34 @@ class QASFTDataset(Dataset):
     """
 
     def __init__(self, base: Dataset, vqa_sources: list | None = None):
-        self._items: list[tuple] = []  # (image, answer, corpus, question); "" question -> per-kind default
-        for i in range(len(base)):
-            row = base[i]
-            corpus = row[2] if len(row) > 2 else None
-            # SyntheticOCR's label IS the visible rendered text -> a clean, diverse, fully-visible
-            # reading needle (vs websight's guessable template / webcode2m's off-page <title>). Its
-            # default read-question ("What text is shown…") already fits, so keep it by name here
-            # rather than via CORPUS_KIND (which would mis-route its generation-metric token budget).
-            needle = (row[1].strip() or None) if corpus == "synthetic" else extract_needle(row[1], CORPUS_KIND.get(corpus))
+        # Store (source, index) refs and decode the image lazily in __getitem__ — the DataLoader workers
+        # then parallelize decode and the Arrow store stays mmap-shared on fork, instead of one process
+        # eagerly decoding ~50k PILs into a list (73GB RSS -> OOM at n_train=16000, 2026-06-02). Needles
+        # are filtered up front from the text labels (cheap column reads, no image decode).
+        self._refs: list[tuple] = []  # (source, idx, corpus, is_vqa, needle)
+        if hasattr(base, "text_labels"):
+            labels = base.text_labels()
+        else:
+            labels = [(r[1], r[2] if len(r) > 2 else None) for r in (base[i] for i in range(len(base)))]
+        for i, (text, corpus) in enumerate(labels):
+            # SyntheticOCR's label IS the visible rendered text -> a clean, diverse, fully-visible reading
+            # needle (vs websight's guessable template / webcode2m's off-page <title>); keep it by name
+            # here rather than via CORPUS_KIND (which would mis-route its generation-metric token budget).
+            needle = (text.strip() or None) if corpus == "synthetic" else extract_needle(text, CORPUS_KIND.get(corpus))
             if needle:
-                self._items.append((row[0], needle, corpus, ""))
+                self._refs.append((base, i, corpus, False, needle))
         for vqa, name in (vqa_sources or []):  # native (image, question, answer) reading supervision
-            for j in range(len(vqa)):
-                img, q, ans = vqa[j]
-                self._items.append((img, ans, f"vqa/{name}", q))  # per-source tag -> own val-loss breakdown
+            self._refs += [(vqa, j, f"vqa/{name}", True, None) for j in range(len(vqa))]
 
     def __len__(self) -> int:
-        return len(self._items)
+        return len(self._refs)
 
-    def __getitem__(self, i: int):
-        return self._items[i]
+    def __getitem__(self, i: int):  # (image, answer, corpus, question); "" question -> per-kind default
+        src, idx, corpus, is_vqa, needle = self._refs[i]
+        if is_vqa:
+            img, q, ans = src[idx]
+            return img, ans, corpus, q
+        return src[idx][0], needle, corpus, ""
 
 
 # VQA reading sets — (image, per-example question, answer) where the answer is short visible text in
