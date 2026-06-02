@@ -1,6 +1,7 @@
-# Free hosted RL of Laguna XS.2 on the frontend-design env.
-# This env shows reward VARIANCE on Laguna (eval: [1.1, 0.0, 1.1], success 0.5) — the learnable
-# success-spread an RLVR run needs. ocr_tool is excluded: Laguna already solves it 4/4 (no gradient).
+# Free hosted RL of Laguna XS.2 on the frontend-design env, scaffold="mixed".
+# Two variance sources feed the gradient: (1) requirement-coverage spread (eval [1.1,0,1.1], success 0.5),
+# and (2) the read_design tool-call SYNTAX — Laguna is 4/4 on line/json/poolside but 0/4 on Hermes xml,
+# so 'mixed' adds a learnable format gap to teach (see docs/specs/2026-06-02-multi-scaffold-tooluse.md).
 #
 #   bash scripts/submit_training.sh frontend_design configs/rl/frontend-design.toml
 #
@@ -10,7 +11,7 @@ model = "poolside/Laguna-XS.2"
 
 max_steps = 60
 batch_size = 64            # rollouts per step (hackathon cap: 128)
-rollouts_per_example = 8   # >1 → within-task reward variance (some rollouts meet more requirements) for GRPO
+rollouts_per_example = 8   # >1 → within-task reward variance (coverage × scaffold) for GRPO
 learning_rate = 1e-5       # conservative on a small, dense-reward task pool
 
 [sampling]
@@ -19,4 +20,4 @@ enable_thinking = false    # non-thinking for agentic training (hackathon best p
 
 [[env]]
 id = "chaleong/frontend-design"
-args = { max_turns = 5 }
+args = { max_turns = 5, scaffold = "mixed" }
