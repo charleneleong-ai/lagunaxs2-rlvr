@@ -10,6 +10,7 @@ Stage-1/Stage-2 mixes will request (the cache is count-keyed, so the count must 
 """
 from __future__ import annotations
 
+import os
 import time
 
 import typer
@@ -20,8 +21,11 @@ app = typer.Typer(add_completion=False, help=__doc__)
 
 
 @app.command()
-def main(specs: list[str] = typer.Argument(..., help="corpus:count, e.g. cauldron_rendered_text:20000")) -> None:
+def main(specs: list[str] = typer.Argument(..., help="corpus:count, e.g. cauldron_rendered_text:20000"),
+         procs: int = typer.Option(1, help="parallel encode workers (file-sharded). The Arrow image "
+                                   "encode is ~0.3s/img single-core; set to ~num_cores for ~Nx faster.")) -> None:
     """Build each `corpus:count` so its on-disk cache is populated (no GPU, no model)."""
+    os.environ["LAGUNA_DATASET_PROCS"] = str(procs)  # read at stream-time by the loaders' _shard_plan
     for spec in specs:
         name, _, count = spec.partition(":")
         n = int(count)
