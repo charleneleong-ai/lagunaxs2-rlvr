@@ -16,7 +16,7 @@ import torch
 import typer
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from laguna_rlvr.visual.corpora import CORPUS_KIND, TASK_PROMPT, build_corpus
+from laguna_rlvr.visual.corpora import CORPUS_KIND, TASK_PROMPT, load_text_image
 from laguna_rlvr.visual.encoders import _REPOS  # canonical model-id registry (avoid a 2nd source of truth)
 from laguna_rlvr.visual.metrics import _CODE_GEN_TOKENS, _OCR_GEN_TOKENS, score_predictions  # gen budgets: one source
 from laguna_rlvr.visual.model import load_causal_lm
@@ -104,7 +104,7 @@ def run_panels(dataset: str, baselines: list[str], n_eval: int, base_llm: str,
     from laguna_rlvr.visual.multiturn_qa import (
         blind_runner, image_fetcher, load_or_build_episodes, ocr_runner, run_qa, transcribe_episodes)
 
-    items = list(build_corpus(dataset, n_eval))
+    items = list(load_text_image(dataset, n_eval))
     kind = CORPUS_KIND.get(dataset)
     task = TASK_PROMPT.get(kind, TASK_PROMPT[None])
     a_max = _OCR_GEN_TOKENS if kind is None else _CODE_GEN_TOKENS

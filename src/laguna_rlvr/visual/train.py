@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
-from laguna_rlvr.visual.corpora import (CHOICES, DEFAULT_VQA, QASFTDataset, build_corpus, load_vqa,
+from laguna_rlvr.visual.corpora import (CHOICES, DEFAULT_VQA, QASFTDataset, load_text_image, load_vqa,
                                         parse_mixture, read_question)
 from laguna_rlvr.visual.multiturn_qa import (_RECALL_Q, dataset_qa_accuracy, evaluate_multiturn_qa,
                                              image_fetcher, mixture_episodes)
@@ -173,7 +173,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         mix_specs = [(k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
     else:
         mix_specs = None
-    full = build_corpus(dataset, n_train, mixture=mix_specs)
+    full = load_text_image(dataset, n_train, mixture=mix_specs)
     if objective == "qa":  # QA-SFT: (image, answer, corpus, question) from needle rows + VQA reading sets
         vqa_names = DEFAULT_VQA if vqa == "default" else [s for s in vqa.split(",") if s]
         full = QASFTDataset(full, vqa_sources=load_vqa(vqa_names, n_train) if vqa_names else None)
@@ -187,7 +187,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
               pin_memory=True, persistent_workers=True)
     loader = DataLoader(train_ds, shuffle=True, **dl)
     val_loader = DataLoader(val_ds, shuffle=False, **dl)
-    eval_loader = DataLoader(build_corpus(eval_dataset, 128), shuffle=False, **dl) if eval_dataset else None
+    eval_loader = DataLoader(load_text_image(eval_dataset, 128), shuffle=False, **dl) if eval_dataset else None
     val_every = max(50, min(max_steps // 10, 500))  # loss/early-stop cadence (bounded for high ceilings)
     gen_every = val_every * 3  # generation metrics (WER/CER) are slow -> coarser cadence than loss val
     wer_items = [val_ds[i] for i in range(min(16, len(val_ds)))]  # fixed subset for WER/CER (generation)

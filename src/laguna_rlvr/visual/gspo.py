@@ -20,7 +20,7 @@ import torch
 import typer
 import wandb
 
-from laguna_rlvr.visual.corpora import (CORPUS_KIND, DEFAULT_VQA, QASFTDataset, build_corpus,
+from laguna_rlvr.visual.corpora import (CORPUS_KIND, DEFAULT_VQA, QASFTDataset, load_text_image,
                                         load_vqa, read_question)
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.model import IMAGE_TOKEN, VisualAdapter
@@ -154,7 +154,7 @@ def main(
     a.load_adapter_state_dict(torch.load(init_ckpt, map_location=a.llm.device))
     print(f"warm-started from {init_ckpt}", flush=True)
 
-    full = QASFTDataset(build_corpus("mix", n_train), vqa_sources=load_vqa(DEFAULT_VQA, n_train))
+    full = QASFTDataset(load_text_image("mix", n_train), vqa_sources=load_vqa(DEFAULT_VQA, n_train))
     items = [(full[i][0], full[i][3] or read_question(CORPUS_KIND.get(full[i][2])), full[i][1])
              for i in range(len(full))]  # (image, question, needle)
     eval_items = [full[i] for i in range(min(40, len(full)))]

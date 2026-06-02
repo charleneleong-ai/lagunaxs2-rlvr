@@ -50,7 +50,7 @@ stays available as a controlled sanity check, not the headline benchmark.
 
 - **Persist** a fixed episode manifest to `data/multiturn_qa.jsonl` — per episode: `(corpus_a, idx_a,
   needle_a)`, `(corpus_b, idx_b, needle_b)`, the recall question. Images are re-fetched by
-  `build_corpus(corpus)[idx]` (HF dataset row order is stable), so the manifest is tiny, inspectable, and
+  `load_text_image(corpus)[idx]` (HF dataset row order is stable), so the manifest is tiny, inspectable, and
   decoupled from generator edits. `evaluate_multiturn_qa` loads the manifest if present, else builds (pick
   needle-bearing rows from the mixture) + writes it. A per-kind `extract_needle(label, kind)` is the only
   new logic; it lives next to `CORPUS_KIND` in `corpora.py`.

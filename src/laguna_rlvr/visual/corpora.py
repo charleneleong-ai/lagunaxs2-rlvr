@@ -80,7 +80,7 @@ class _Mixture(Dataset):
         self._index: list[tuple[int, int]] = []
         for di, (name, weight) in enumerate(specs):
             quota = max(1, round(n * weight / total))
-            ds = build_corpus(name, quota)
+            ds = load_text_image(name, quota)
             self._datasets.append(ds)
             self._names.append(name)
             # cap to the quota so a fixed-size corpus (swebench_mm always returns 612) can't blow its
@@ -176,7 +176,7 @@ class QASFTDataset(Dataset):
     """QA-SFT triples from a base mixture's needle-bearing rows: (image, needle, corpus). The needle
     (chart/page title via `extract_needle`) is the answer to that kind's question, and is NOT in the
     question — so training on it forces the projector to convey vision (vs reconstruction's text-LM
-    shortcut). Rows without a clean needle (synthetic / swebench prose) are dropped. Wrap `build_corpus
+    shortcut). Rows without a clean needle (synthetic / swebench prose) are dropped. Wrap `load_text_image
     ("mix", n)` (its rows carry the corpus tag needed to pick the kind/question).
     """
 
@@ -224,8 +224,7 @@ DEFAULT_VQA = list(VQA_SPECS)  # all registered VQA reading sets — on by defau
 
 def load_vqa(names: list[str], n: int) -> list[tuple]:
     from laguna_rlvr.visual.hf_image_text import VQADataset  # local: lazy heavy-dep, matches the builders
-    # Each VQA set is an independent disk/stream materialization (I/O-bound); load them concurrently in a
-    # thread pool to overlap the startup loads instead of paying them serially. ex.map preserves order.
+    # Each VQA set is an independent I/O-bound materialization; load them concurrently to overlap startup.
     with ThreadPoolExecutor(max_workers=max(1, len(names))) as ex:
         return list(ex.map(lambda name: (VQADataset(n=n, **VQA_SPECS[name]), name), names))
 
@@ -239,7 +238,7 @@ def parse_mixture(spec: str) -> list[tuple[str, float]]:
     return pairs
 
 
-def build_corpus(name: str, n: int, mixture: list[tuple[str, float]] | None = None) -> Dataset:
+def load_text_image(name: str, n: int, mixture: list[tuple[str, float]] | None = None) -> Dataset:
     if name == "mix":
         return _Mixture(mixture or _DEFAULT_MIX, n)
     if name == "align":  # Stage-1 text-rich projector-alignment mix (override weights via --mixture)
