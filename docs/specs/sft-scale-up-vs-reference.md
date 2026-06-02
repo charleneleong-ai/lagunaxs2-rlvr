@@ -37,6 +37,10 @@ LLaVA-Pretrain alignment)** and **compute (8 GPUs vs 1)**.
 1. **Materialize data** — LLaVA-Pretrain 120k (Stage-1) + LLaVA-Instruct/ShareGPT4V/DocVQA + our OCR/
    chart corpora (Stage-2 ~150–200k), via the reference's `data/hf_materialize.py` + `general_recipe.py`.
    COCO train2017 image root needed for the instruct sets.
+   - **Wired so far:** the `align` mix now includes `cauldron_rendered_text` (real rendered-text
+     transcription from `HuggingFaceM4/the_cauldron`) alongside SyntheticOCR + WebSight, plus
+     `cauldron_textcaps` / `cauldron_iam` registered. Next text-rich adds: `pixparse/idl-wds` +
+     `pdfa-eng-wds` (real-doc OCR at scale), LLaVAR (OCR-instruction), `the_cauldron` QA configs (Stage-2).
 2. **Stage-1 alignment** — `laguna_llava_stage1.sh` (projector-only, LR 1e-3, 1 epoch) → `projector.pt`.
 3. **Stage-2 instruction** — `laguna_llava_stage2.sh` warm-started from Stage-1 (projector+LoRA r64/α128,
    LR 2e-5, 1 epoch) → the reader checkpoint.

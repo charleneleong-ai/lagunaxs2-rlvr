@@ -12,15 +12,33 @@ def test_build_corpus_dispatches_synthetic():  # offline — no network/model
 def test_align_mix_is_registered_and_reading_biased():
     from laguna_rlvr.visual.corpora import CHOICES, _ALIGN_MIX
     assert "align" in CHOICES
-    weights = dict(_ALIGN_MIX)
-    # synthetic (visible-text recon targets) must dominate so Stage-1 anchors readout; a code-target
-    # corpus (websight=HTML) must stay a minority or it erodes readout (caught 2026-05).
-    assert weights["synthetic"] >= 2 * sum(w for n, w in _ALIGN_MIX if n != "synthetic")
+    total = sum(w for _, w in _ALIGN_MIX)
+    # reading sources (synthetic visible-text + cauldron_* transcription) must dominate so Stage-1
+    # anchors readout; code-target corpora (websight=HTML) stay a minority or readout erodes (2026-05).
+    reading = sum(w for n, w in _ALIGN_MIX if n == "synthetic" or n.startswith("cauldron"))
+    assert reading / total >= 0.7
+    assert max(_ALIGN_MIX, key=lambda kv: kv[1])[0] == "synthetic"  # synthetic the largest single anchor
 
 
 def test_build_corpus_align_dispatches_to_mixture():  # offline — override to synthetic-only
     ds = build_corpus("align", 8, mixture=[("synthetic", 1.0)])
     assert len(ds) == 8 and ds[0][2] == "synthetic"
+
+
+def test_cauldron_dataset_extracts_image_and_transcription(tmp_path, monkeypatch):  # offline — mocked
+    from PIL import Image
+
+    import laguna_rlvr.visual.hf_image_text as hit
+
+    monkeypatch.setattr(hit, "_CACHE_DIR", tmp_path / "cache")
+    rows = [{"images": [Image.new("RGB", (8, 8))],
+             "texts": [{"user": "Type out the text.", "assistant": f"line {i}", "source": "x"}]}
+            for i in range(2)]
+    monkeypatch.setattr(hit, "load_dataset", lambda *a, **k: iter(rows))
+    ds = hit.CauldronDataset("rendered_text", n=2)
+    assert len(ds) == 2
+    img, txt = ds[0]
+    assert txt == "line 0"  # first turn's assistant becomes the recon transcription target
 
 
 def test_build_corpus_unknown_raises():
