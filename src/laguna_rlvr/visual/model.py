@@ -269,23 +269,42 @@ class VisualAdapter(nn.Module):
         LLM shortcut via text-LM and ignore the projector; this objective can't be shortcut.)
         """
         vis = self._project(images)
-        losses = []
+        dev = self.llm.device
+        seqs, labels = [], []
         for b, (answer, corpus) in enumerate(zip(answers, corpora)):
             q = (questions[b] if questions and questions[b] else read_question(CORPUS_KIND.get(corpus)))
-            prompt = f"{IMAGE_TOKEN}\n{q}\nAnswer:"
-            prompt_e = self._embed_with_vision(prompt, vis[b : b + 1])
+            prompt_e = self._embed_with_vision(f"{IMAGE_TOKEN}\n{q}\nAnswer:", vis[b : b + 1])
             ans_ids = self.tok(" " + answer, return_tensors="pt", add_special_tokens=False,
-                               truncation=True, max_length=_MAX_LABEL_TOKENS).input_ids.to(self.llm.device)
+                               truncation=True, max_length=_MAX_LABEL_TOKENS).input_ids.to(dev)
             if prompt_e.shape[1] + ans_ids.shape[1] > _MAX_SEQ_TOKENS:
                 continue
             ans_e = self.llm.get_input_embeddings()(ans_ids)
-            inputs = torch.cat([prompt_e, ans_e], dim=1)
-            mask = torch.full((1, prompt_e.shape[1]), -100, device=self.llm.device)
-            tgt = torch.cat([mask, ans_ids], dim=1)
-            losses.append(self.llm(inputs_embeds=inputs, labels=tgt).loss)
-        if not losses:
+            seqs.append(torch.cat([prompt_e, ans_e], dim=1)[0])  # (Li, D)
+            labels.append(torch.cat([torch.full((prompt_e.shape[1],), -100, dtype=torch.long, device=dev),
+                                     ans_ids[0]]))  # (Li,) prompt masked, answer supervised
+        if not seqs:
             return Output(loss=vis.sum() * 0.0)
-        return Output(loss=torch.stack(losses).mean() + self._scale_penalty(vis))
+        return Output(loss=self._batched_lm_loss(seqs, labels, self.llm) + self._scale_penalty(vis))
+
+    @staticmethod
+    def _batched_lm_loss(seqs: list[torch.Tensor], labels: list[torch.Tensor], llm) -> torch.Tensor:
+        """Right-pad a batch of (inputs_embeds (Li, D), labels (Li,)) and run `llm` once over the
+        [B, L] batch, returning the EXAMPLE-weighted mean CE — each example's mean over its own answer
+        tokens, then averaged across the batch. This matches the per-example loop it replaces (so loss
+        semantics are unchanged) but in a single batched forward, which actually fills the GPU at
+        micro_batch>1. Padding gets attention_mask=0 + label -100, so it neither attends nor scores;
+        right-padding leaves the real tokens at positions 0..Li-1, so default position ids stay correct."""
+        pad = torch.nn.utils.rnn.pad_sequence
+        emb = pad(seqs, batch_first=True)                              # (B, L, D), 0-padded
+        lab = pad(labels, batch_first=True, padding_value=-100)        # (B, L)
+        lengths = torch.tensor([s.shape[0] for s in seqs], device=emb.device)
+        attn = (torch.arange(emb.shape[1], device=emb.device)[None] < lengths[:, None]).long()
+        logits = llm(inputs_embeds=emb, attention_mask=attn).logits[:, :-1]  # (B, L-1, V)
+        tgt = lab[:, 1:]                                                      # next-token targets
+        ce = nn.functional.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1),
+                                         ignore_index=-100, reduction="none").view(tgt.shape)
+        per_example = ce.sum(1) / (tgt != -100).sum(1).clamp(min=1)          # mean over each row's answer
+        return per_example.mean()
 
     @torch.no_grad()
     def transcribe(self, images: list, max_new_tokens: int = 48) -> list[str]:
