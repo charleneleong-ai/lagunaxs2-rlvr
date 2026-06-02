@@ -41,6 +41,36 @@ def _cached_or_stream(key: str, stream_fn: Callable[[], HFDataset]) -> HFDataset
     return ds
 
 
+_IMG_TEXT_FEATURES = Features({"image": HFImage(), "text": Value("string")})
+
+
+def _image_text_rows(*, repo, config, split, n, offset, image_col, text_col, max_text_chars):
+    """Yield {image, text} rows from a flat HF (image, text) dataset — for from_generator (incremental,
+    low-memory). gen_kwargs carry the args so from_generator fingerprints the cache by them."""
+    stream = load_dataset(repo, config, split=split, streaming=True)
+    kept = 0
+    for row in track(islice(stream, offset, offset + n), total=n, description=f"{repo} ({n})"):
+        img, txt = row.get(image_col), row.get(text_col)
+        if img is not None and txt:
+            kept += 1
+            yield {"image": img.convert("RGB"), "text": txt[:max_text_chars]}
+    if kept == 0:
+        raise RuntimeError(f"no usable rows from {repo} (cols {image_col!r}/{text_col!r})")
+
+
+def _cauldron_rows(*, config, split, n, offset, max_text_chars):
+    """Yield {image, transcription} rows from a the_cauldron config — for from_generator."""
+    stream = load_dataset("HuggingFaceM4/the_cauldron", config, split=split, streaming=True)
+    kept = 0
+    for row in track(islice(stream, offset, offset + n), total=n, description=f"cauldron/{config} ({n})"):
+        images, texts = row.get("images"), row.get("texts")
+        if images and texts and texts[0].get("assistant"):
+            kept += 1
+            yield {"image": images[0].convert("RGB"), "text": texts[0]["assistant"][:max_text_chars]}
+    if kept == 0:
+        raise RuntimeError(f"no usable rows from the_cauldron/{config}")
+
+
 class HFImageTextDataset(Dataset):
     """(screenshot, code) pairs streamed from an HF dataset (embedded image + text), cached to disk."""
 
@@ -55,20 +85,14 @@ class HFImageTextDataset(Dataset):
     @staticmethod
     def _stream(repo: str, config: str | None, split: str, n: int, offset: int,
                 image_col: str, text_col: str, max_text_chars: int) -> HFDataset:
-        stream = load_dataset(repo, config, split=split, streaming=True)
-        imgs, txts = [], []
-        # offset skips the first `offset` rows — carves a held-out eval slice disjoint from the
-        # training range (which streams from row 0).
-        for row in track(islice(stream, offset, offset + n), total=n, description=f"{repo} ({n})"):
-            img, txt = row.get(image_col), row.get(text_col)
-            if img is not None and txt:
-                imgs.append(img.convert("RGB"))
-                txts.append(txt[:max_text_chars])
-        if not imgs:
-            raise RuntimeError(f"no usable rows from {repo} (cols {image_col!r}/{text_col!r})")
-        # convert to RGB once here so the cached bytes are RGB — no per-access reconversion downstream.
-        return HFDataset.from_dict({"image": imgs, "text": txts},
-                                   features=Features({"image": HFImage(), "text": Value("string")}))
+        # from_generator writes Arrow shards incrementally as rows are yielded (one image in flight) —
+        # low memory + scalable. from_dict held all N decoded images in RAM and encoded them in one
+        # monolithic pass: ~24GB + single-shot encode at N=8000 stalled training/preload (2026-06-02).
+        # offset skips the first `offset` rows -> a held-out eval slice disjoint from the training range.
+        return HFDataset.from_generator(
+            _image_text_rows, features=_IMG_TEXT_FEATURES,
+            gen_kwargs=dict(repo=repo, config=config, split=split, n=n, offset=offset,
+                            image_col=image_col, text_col=text_col, max_text_chars=max_text_chars))
 
     def __len__(self) -> int:
         return len(self._ds)
@@ -92,17 +116,10 @@ class CauldronDataset(Dataset):
 
     @staticmethod
     def _stream(config, split, n, offset, max_text_chars) -> HFDataset:
-        stream = load_dataset("HuggingFaceM4/the_cauldron", config, split=split, streaming=True)
-        imgs, txts = [], []
-        for row in track(islice(stream, offset, offset + n), total=n, description=f"cauldron/{config} ({n})"):
-            images, texts = row.get("images"), row.get("texts")
-            if images and texts and texts[0].get("assistant"):
-                imgs.append(images[0].convert("RGB"))
-                txts.append(texts[0]["assistant"][:max_text_chars])
-        if not imgs:
-            raise RuntimeError(f"no usable rows from the_cauldron/{config}")
-        return HFDataset.from_dict({"image": imgs, "text": txts},
-                                   features=Features({"image": HFImage(), "text": Value("string")}))
+        # incremental write (see HFImageTextDataset._stream) — from_dict on N large images stalled
+        return HFDataset.from_generator(
+            _cauldron_rows, features=_IMG_TEXT_FEATURES,
+            gen_kwargs=dict(config=config, split=split, n=n, offset=offset, max_text_chars=max_text_chars))
 
     def __len__(self) -> int:
         return len(self._ds)
