@@ -2,8 +2,8 @@
 
 The simplest way to serve the adapter on an 80GB GPU: load `VisualAdapter` once, then `adapter.chat`
 per request (HF `generate(inputs_embeds=...)`, vision spliced at `<image>`). No vLLM, no gateway — for
-fast batched serving use the `--enable-prompt-embeds` vLLM gateway (laguna-vision-vllm) instead; this is
-the dependency-free path for trying / demoing a checkpoint.
+fast batched serving use an `--enable-prompt-embeds` vLLM prompt-embeds gateway instead; this is the
+dependency-free path for trying / demoing a checkpoint.
 
   python -m laguna_rlvr.visual.serve --ckpt results/visual/<run>/best.pt --encoder siglip --unfreeze lora
   curl -s localhost:8100 -d '{"image":"https://.../x.jpg","question":"What does it say?"}'
