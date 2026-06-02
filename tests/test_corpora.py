@@ -9,6 +9,20 @@ def test_build_corpus_dispatches_synthetic():  # offline — no network/model
     assert isinstance(ds, SyntheticOCR) and len(ds) == 8
 
 
+def test_align_mix_is_registered_and_reading_biased():
+    from laguna_rlvr.visual.corpora import CHOICES, _ALIGN_MIX
+    assert "align" in CHOICES
+    weights = dict(_ALIGN_MIX)
+    # synthetic (visible-text recon targets) must dominate so Stage-1 anchors readout; a code-target
+    # corpus (websight=HTML) must stay a minority or it erodes readout (caught 2026-05).
+    assert weights["synthetic"] >= 2 * sum(w for n, w in _ALIGN_MIX if n != "synthetic")
+
+
+def test_build_corpus_align_dispatches_to_mixture():  # offline — override to synthetic-only
+    ds = build_corpus("align", 8, mixture=[("synthetic", 1.0)])
+    assert len(ds) == 8 and ds[0][2] == "synthetic"
+
+
 def test_build_corpus_unknown_raises():
     with pytest.raises(ValueError):
         build_corpus("nope", 4)
@@ -96,5 +110,6 @@ def test_qasft_dataset_extracts_needle_triples():
 
     ds = QASFTDataset(_Base())
     assert len(ds) == 2  # only needle-bearing rows
-    assert ds[0] == ("imgA", "Sales", "chartmimic")
-    assert ds[1] == ("imgB", "Home", "design2code")
+    # (image, needle, corpus, question) — question is "" for needle-extracted rows (set only for VQA)
+    assert ds[0] == ("imgA", "Sales", "chartmimic", "")
+    assert ds[1] == ("imgB", "Home", "design2code", "")
