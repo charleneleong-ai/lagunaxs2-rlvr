@@ -25,7 +25,9 @@ from torch.utils.data import DataLoader, Dataset
 
 from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
-from laguna_rlvr.visual.corpora import CHOICES, build_corpus, parse_mixture
+from laguna_rlvr.visual.corpora import (CHOICES, DEFAULT_VQA, QASFTDataset, build_corpus, load_vqa,
+                                        parse_mixture)
+from laguna_rlvr.visual.multiturn_qa import dataset_qa_accuracy
 from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.hf_image_text import HFImageTextDataset
@@ -174,7 +176,6 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         mix_specs = None
     full = build_corpus(dataset, n_train, mixture=mix_specs)
     if objective == "qa":  # QA-SFT: (image, answer, corpus, question) from needle rows + VQA reading sets
-        from laguna_rlvr.visual.corpora import DEFAULT_VQA, QASFTDataset, load_vqa
         vqa_names = DEFAULT_VQA if vqa == "default" else [s for s in vqa.split(",") if s]
         full = QASFTDataset(full, vqa_sources=load_vqa(vqa_names, n_train) if vqa_names else None)
     n_val = min(max(1, len(full) // 10), 256)  # 90/10 split, capped so frequent val stays cheap
@@ -189,6 +190,17 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     wer_items = [val_ds[i] for i in range(min(16, len(val_ds)))]  # fixed subset for WER/CER (generation)
     # fixed val sample for full-distribution QA-read accuracy (incl. VQA/synthetic, per corpus)
     qa_eval_items = [val_ds[i] for i in range(min(40, len(val_ds)))] if objective == "qa" else []
+    # Inline reading probe for non-QA objectives (recon Stage-1): a fixed REAL-VQA sample, independent
+    # of the (synthetic-heavy) train mix, so we watch real-image reading TRANSFER live each eval rather
+    # than stop-and-eval. Observational only — logged under read/, never drives val selection. Built
+    # defensively: a VQA fetch failure must not kill a detached run (cf. _ocr_probe).
+    read_probe_items: list = []
+    if qa_eval and objective != "qa":
+        try:
+            _probe = QASFTDataset([], vqa_sources=load_vqa(DEFAULT_VQA, 5))
+            read_probe_items = [_probe[i] for i in range(min(24, len(_probe)))]
+        except Exception as e:  # noqa: BLE001 — never let a probe-data fetch kill training
+            print(f"read-probe build failed ({e}); skipping inline reading probe", flush=True)
     wer_images = [it[0] for it in wer_items]  # same subset's images, reused for the embedding-drift gauge
     ocr_probe = _ocr_probe(seed=10_007)  # held-out general-OCR retention probe (val + eval)
 
@@ -286,7 +298,6 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             metrics["eval/loss/total"] = eval_loss
                         cur_qa = None  # for QA, score read accuracy EVERY val — it's the selection signal
                         if qa_eval and objective == "qa":
-                            from laguna_rlvr.visual.multiturn_qa import dataset_qa_accuracy
                             torch.cuda.empty_cache()  # reclaim training fragmentation before generation
                             metrics.update(dataset_qa_accuracy(adapter, qa_eval_items))
                             cur_qa = metrics["qa/metrics/accuracy"]
@@ -307,6 +318,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             metrics.update(generation_metrics(adapter, ocr_probe, "val/ocr"))  # base-OCR retention
                             # base-preservation gauge — projected tokens in-distribution vs base embeds
                             metrics["val/metrics/embed_norm_ratio"] = adapter.embedding_norm_ratio(wer_images)
+                            if read_probe_items:  # real-VQA reading-transfer probe (recon Stage-1) —
+                                # observational (read/, no selection); on the slow-gen cadence with WER/CER
+                                metrics.update(dataset_qa_accuracy(adapter, read_probe_items, prefix="read"))
                             if run:  # (image, target, prediction) samples — what it reads, over training
                                 _log_predictions(run, adapter, wer_items, "val/samples", step)
                         gen_str = ""  # surface the generation-cadence metrics in the text log, not just W&B
@@ -318,6 +332,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                             gen_str += f"  qa_acc {metrics['qa/metrics/accuracy']:.3f}"
                             gen_str += "".join(f" {k.rsplit('_', 1)[1]}={v:.2f}"
                                                for k, v in metrics.items() if "/acc_" in k)
+                        if "read/metrics/accuracy" in metrics:  # inline real-VQA reading-transfer probe
+                            gen_str += f"  read_acc {metrics['read/metrics/accuracy']:.3f}"
                         # qa_acc is noisy (small eval set) — it wobbles down between peaks, so a tight
                         # patience early-stops too soon (NaFlex died at step 1119). Be 3x more tolerant
                         # on qa than on the smooth val-loss signal.
@@ -350,7 +366,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                     run.log({"eval/loss/total": eval_loss, "eval/metrics/embed_norm_ratio": drift, **ocr}, step=step)
                     _log_predictions(run, adapter, ocr_probe, "eval/samples", step)
             if qa_eval:  # single-turn read accuracy (per corpus) + multi-turn cross-turn recall
-                from laguna_rlvr.visual.multiturn_qa import dataset_qa_accuracy, evaluate_multiturn_qa
+                from laguna_rlvr.visual.multiturn_qa import evaluate_multiturn_qa
 
                 qa = dataset_qa_accuracy(adapter, qa_eval_items)  # the target metric (incl. VQA/synthetic)
                 qa_acc = qa["qa/metrics/accuracy"]
