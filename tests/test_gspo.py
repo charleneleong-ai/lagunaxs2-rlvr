@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from laguna_rlvr.visual.gspo import _surrogate_loss, read_reward
+from laguna_rlvr.visual.gspo import _reduction_denom, _surrogate_loss, read_reward
 
 
 @pytest.mark.parametrize("mode", ["gspo", "grpo"])
@@ -30,6 +30,27 @@ def test_surrogate_loss_equal_logp_is_negative_mean_advantage():
 ])
 def test_read_reward_endpoints(needle, completion, expected):
     assert read_reward(needle, completion) == expected
+
+
+@pytest.mark.parametrize("mode", ["gspo", "grpo"])
+@pytest.mark.parametrize("micro", [1, 2, 3])
+def test_micro_chunk_composition_equals_full_group_loss(mode, micro):
+    # the G=16-on-80GB lever: chunk the with-grad forward into `micro` rows and rescale each chunk
+    # by chunk_denom/total so the summed per-chunk loss == the single full-group loss (=> identical
+    # accumulated gradient). gspo reduces over G sequences, grpo over all unmasked tokens.
+    torch.manual_seed(0)
+    G = 6
+    cur, old = torch.randn(G, 5), torch.randn(G, 5)
+    mask = (torch.arange(5)[None, :] < torch.randint(1, 6, (G, 1))).float()  # ragged lengths
+    adv = torch.randn(G)
+    kw = dict(mode=mode, clip=0.2, max_logratio=10.0)
+    full = _surrogate_loss(cur, old, mask, adv, **kw)
+    total = _reduction_denom(mask, mode=mode)
+    chunked = sum(
+        _surrogate_loss(cur[s:s + micro], old[s:s + micro], mask[s:s + micro], adv[s:s + micro], **kw)
+        * (_reduction_denom(mask[s:s + micro], mode=mode) / total)
+        for s in range(0, G, micro))
+    assert torch.isclose(full, chunked, atol=1e-5)
 
 
 def test_read_reward_partial_is_bounded_below_exact():

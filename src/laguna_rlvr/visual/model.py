@@ -213,8 +213,13 @@ class VisualAdapter(nn.Module):
         ratio = vis.flatten(0, 1).float().norm(dim=-1).mean() / self._emb_norm_median
         return self.norm_penalty * (ratio - 1.0).clamp(min=0) ** 2
 
-    def _project(self, images: list, anchor: bool | None = None) -> torch.Tensor:
-        feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
+    def _project(self, images: list, anchor: bool | None = None,
+                 feats: torch.Tensor | None = None) -> torch.Tensor:
+        # `feats` lets a caller reuse cached frozen-encoder output (constant per image) and recompute
+        # only the trainable projector — used by GSPO to rebuild the prompt per micro-chunk without
+        # re-running the encoder. None -> encode the images here as usual.
+        if feats is None:
+            feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
         vis = self.projector(feats)  # (B, Nv, D)
         return self._anchor(vis) if (self.use_anchor if anchor is None else anchor) else vis
 
