@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import time
 
+import datasets
 import typer
 
 from laguna_rlvr.visual.corpora import VQA_SPECS, load_text_image
@@ -27,6 +28,8 @@ def main(specs: list[str] = typer.Argument(..., help="corpus-or-vqa:count, e.g. 
                                    "encode is ~0.3s/img single-core; set to ~num_cores for ~Nx faster.")) -> None:
     """Populate the on-disk cache for each `name:count` (no GPU, no model). `name` is a load_text_image
     corpus OR a VQA reading set (VQA_SPECS), so the Stage-2 VQA suite can be preloaded too."""
+    datasets.disable_progress_bars()  # the loaders wrap row iteration in rich `track`; silence HF's own
+    #                                   per-worker "Generating train split" tqdm so that's the only bar
     os.environ["LAGUNA_DATASET_PROCS"] = str(procs)  # read at stream-time by the loaders' _shard_plan
     for spec in specs:
         name, _, count = spec.partition(":")
