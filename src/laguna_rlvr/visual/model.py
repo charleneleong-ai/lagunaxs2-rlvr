@@ -214,8 +214,14 @@ class VisualAdapter(nn.Module):
         return self.norm_penalty * (ratio - 1.0).clamp(min=0) ** 2
 
     def _project(self, images: list, anchor: bool | None = None) -> torch.Tensor:
-        feats = self.encoder.encode(images).to(device=self.llm.device, dtype=self.llm.dtype)
-        vis = self.projector(feats)  # (B, Nv, D)
+        # Encode + resample each image individually, then stack the fixed-size (Nv, D) outputs. NaFlex
+        # emits a variable patch count per image, so raw encoder features can't be stacked into one batch
+        # pre-resampler (crashes on the heterogeneous Stage-2 mix via transcribe/_log_predictions). The
+        # resampler folds N -> fixed Nv, so the per-image outputs ARE uniform and stack cleanly. AnyRes
+        # (fixed N) works identically; _project runs at micro_batch=1 in training, batched only at eval.
+        dev, dt = self.llm.device, self.llm.dtype
+        vis = torch.cat([self.projector(self.encoder.encode([img]).to(device=dev, dtype=dt))
+                         for img in images], dim=0)  # (B, Nv, D)
         return self._anchor(vis) if (self.use_anchor if anchor is None else anchor) else vis
 
     @torch.no_grad()
