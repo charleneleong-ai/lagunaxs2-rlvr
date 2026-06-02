@@ -379,11 +379,15 @@ class VisualAdapter(nn.Module):
         return out
 
     @torch.no_grad()
-    def chat(self, turns: list[Turn], max_new_tokens: int = 48) -> list[str]:
+    def chat(self, turns: list[Turn], max_new_tokens: int = 48, **gen_kwargs) -> list[str]:
         """Multi-turn multimodal QA: generate an assistant reply per turn, conditioned on all prior
         turns + their images. Each turn's `<image>` markers are filled by that turn's images (0..N),
         so vision arrives across turns — the agentic, tool-observation-style use, not a fixed prefix.
+
+        `gen_kwargs` override the default greedy decode (e.g. repetition_penalty, no_repeat_ngram_size)
+        — greedy collapses to token loops on hard reads, so callers can pass anti-repetition decoding.
         """
+        gen = {"do_sample": False, **gen_kwargs}
         self.llm.gradient_checkpointing_disable()  # generation only — no backward to checkpoint for
         try:
             ctx, replies = None, []
@@ -395,7 +399,7 @@ class VisualAdapter(nn.Module):
                 turn_e = self._embed_multi(turn.text, vis_list)
                 ctx = turn_e if ctx is None else torch.cat([ctx, turn_e], dim=1)
                 reply_ids = self.llm.generate(
-                    inputs_embeds=ctx, max_new_tokens=max_new_tokens, do_sample=False)
+                    inputs_embeds=ctx, max_new_tokens=max_new_tokens, **gen)
                 replies.append(self.tok.decode(reply_ids[0], skip_special_tokens=True))
                 ctx = torch.cat([ctx, self.llm.get_input_embeddings()(reply_ids)], dim=1)
             return replies
