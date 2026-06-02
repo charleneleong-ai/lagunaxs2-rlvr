@@ -1,4 +1,4 @@
-"""Train the visual-adapter projector (frozen encoder + frozen LLM), realizing an mm_adapter
+"""Train the visual-adapter projector (frozen encoder + frozen LLM), realizing an adapter_plan
 AdapterPlan TOML. Debug on a small base; point --base at the unquantized Laguna on an 80GB GPU.
 
   python -m laguna_rlvr.visual.train --base Qwen/Qwen3-0.6B --steps 50
@@ -23,7 +23,7 @@ from autoresearch.gpu_monitor import GPUMonitor
 from autoresearch.results import log_experiment
 from torch.utils.data import DataLoader, Dataset
 
-from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
+from laguna_rlvr.adapter_plan import plan_from_config, render_plan, validate_gpu_budget
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
 from laguna_rlvr.visual.corpora import (CHOICES, DEFAULT_VQA, QASFTDataset, build_corpus, load_vqa,
                                         parse_mixture, read_question)
