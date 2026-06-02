@@ -1,4 +1,4 @@
-from laguna_rlvr.mm_adapter import plan_from_config, render_plan, validate_gpu_budget
+from laguna_rlvr.adapter_plan import plan_from_config, render_plan, validate_gpu_budget
 
 _CONFIG = {
     "name": "test-plan",
