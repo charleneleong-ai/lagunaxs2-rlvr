@@ -62,3 +62,20 @@ def test_render_plan_reports_guardrail_status():
     assert "poolside/Laguna-XS.2-NVFP4" in rendered
     assert "zai-org/GLM-OCR" in rendered
     assert "GPU guardrails: pass" in rendered
+
+
+def test_qa_sft_lora_microbatch2_is_not_blocked():
+    # Stage-2 legitimately uses attention LoRA + micro_batch=2 (batched forward_qa); the guardrail judges
+    # VRAM budget + freeze invariants, not stage methodology, so neither is an issue.
+    cfg = {
+        **_CONFIG,
+        "backbone": {**_CONFIG["backbone"], "quantization": "bf16"},
+        "gpu_guardrails": {"max_vram_gb": 80, "reserve_vram_gb": 6},
+        "training": {"micro_batch_size": 2, "gradient_accumulation_steps": 4, "lora_enabled": True},
+    }
+    assert validate_gpu_budget(plan_from_config(cfg)) == []
+
+
+def test_absurd_micro_batch_is_flagged():
+    cfg = {**_CONFIG, "training": {**_CONFIG["training"], "micro_batch_size": 32}}
+    assert any("micro_batch_size should be 1-8" in i for i in validate_gpu_budget(plan_from_config(cfg)))

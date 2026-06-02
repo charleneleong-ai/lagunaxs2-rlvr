@@ -91,7 +91,10 @@ def plan_from_config(cfg: dict[str, Any]) -> AdapterPlan:
 
 
 def validate_gpu_budget(plan: AdapterPlan) -> list[str]:
-    """Return blocking issues for the projector-only stage against the config's own VRAM budget."""
+    """Return blocking issues for a single-GPU adapter-training stage against the config's VRAM budget +
+    freeze invariants. Stage methodology (LoRA on/off, micro-batch size) is NOT judged here: Stage-1
+    aligns the projector frozen-decoder, Stage-2 adds attention LoRA + micro_batch>1 (batched forward_qa)
+    — both legitimate, so this checks budget/freeze, not which stage you're in."""
     issues: list[str] = []
     if plan.backbone_params_b > 0:
         need = plan.backbone_vram_gb + plan.reserve_vram_gb
@@ -107,12 +110,11 @@ def validate_gpu_budget(plan: AdapterPlan) -> list[str]:
         issues.append("freeze the modality encoder for the first alignment stage")
     if not plan.train_projector:
         issues.append("train_projector must be true; otherwise there is no native adapter to learn")
-    if plan.micro_batch_size != 1:
-        issues.append("use micro_batch_size=1 and gradient accumulation for the single-GPU stage")
+    if not 1 <= plan.micro_batch_size <= 8:
+        issues.append("micro_batch_size should be 1-8 on a single GPU; raise gradient_accumulation_steps "
+                      "for a larger effective batch")
     if plan.max_sequence_length > 8192:
         issues.append("start with max_sequence_length<=8192; long-context multimodal RL can come later")
-    if plan.lora_enabled:
-        issues.append("disable LoRA for the first projector-only stage; add QLoRA after the projector learns")
     return issues
 
 
