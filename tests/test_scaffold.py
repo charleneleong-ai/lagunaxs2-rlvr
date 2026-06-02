@@ -1,7 +1,8 @@
 import pytest
 from scaffold_emit import emit_call as _emit
 
-from laguna_rlvr.scaffold import FORMATS, Tool, parse_call, render_instructions, resolve_format
+from laguna_rlvr.scaffold import (FORMATS, Tool, parse_call, parse_native, render_instructions,
+                                  resolve_format, to_tool_defs)
 
 _TOOLS = [Tool("ocr", "image_id", "read an image"), Tool("answer", "value", "submit the final answer")]
 
@@ -45,6 +46,35 @@ class TestResolveFormat:
     def test_mixed_round_robins_over_all_formats(self):
         assert {resolve_format(i, "mixed") for i in range(len(FORMATS))} == set(FORMATS)
 
+    def test_native_passes_through_not_in_mixed(self):
+        assert resolve_format(0, "native") == "native"
+        assert "native" not in FORMATS   # native is an env-level mode, not a round-robined text format
+
     def test_rejects_unknown(self):
         with pytest.raises(ValueError):
             resolve_format(0, "bogus")
+
+
+class TestNative:
+    def test_to_tool_defs_shape(self):
+        defs = to_tool_defs(_TOOLS)   # vf.Tool flat format, not the legacy OpenAI {type,function} wrapper
+        assert {d["name"] for d in defs} == {"ocr", "answer"}
+        ocr_def = next(d for d in defs if d["name"] == "ocr")
+        assert ocr_def["parameters"]["required"] == ["image_id"]
+
+    def test_parse_native_dict_message(self):
+        msg = {"tool_calls": [{"function": {"name": "ocr", "arguments": '{"image_id": "a.png"}'}}]}
+        assert parse_native(msg, _TOOLS) == ("ocr", "a.png")
+
+    def test_parse_native_object_message_with_dict_args(self):
+        fn = type("Fn", (), {"name": "answer", "arguments": {"value": "42"}})()
+        msg = type("Msg", (), {"tool_calls": [type("Call", (), {"function": fn})()]})()
+        assert parse_native(msg, _TOOLS) == ("answer", "42")
+
+    @pytest.mark.parametrize("msg", [
+        {"tool_calls": None},                                                          # no calls
+        {"tool_calls": [{"function": {"name": "unknown", "arguments": "{}"}}]},         # unknown tool
+        {"content": "just text"},                                                      # not a tool message
+    ])
+    def test_parse_native_none(self, msg):
+        assert parse_native(msg, _TOOLS) is None

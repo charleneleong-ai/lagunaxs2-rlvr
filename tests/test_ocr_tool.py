@@ -70,6 +70,21 @@ class TestEnv:
         asyncio.run(env.env_response([{"role": "assistant", "content": "answer: 42"}], state))
         assert state["done"] and not state["solved"]
 
+    def test_native_scaffold_reads_structured_tool_calls(self):
+        env = ocr_tool.load_environment(scaffold="native")
+        assert all(r["info"]["fmt"] == "native" for r in env.eval_dataset.to_list())
+        state = {"info": {"image_id": "invoice.png", "text": "Total Due: $42.50",
+                          "answer": "42.50", "fmt": "native"}, "turn": 1}
+        asyncio.run(env.setup_state(state))
+        ocr_msg = {"role": "assistant", "content": "",
+                   "tool_calls": [{"function": {"name": "ocr", "arguments": '{"image_id":"invoice.png"}'}}]}
+        obs = asyncio.run(env.env_response([ocr_msg], state))
+        assert "42.50" in obs[0]["content"] and not state["done"]
+        ans_msg = {"role": "assistant", "content": "",
+                   "tool_calls": [{"function": {"name": "answer", "arguments": '{"value":"42.50"}'}}]}
+        asyncio.run(env.env_response([ans_msg], state))
+        assert state["solved"] and state["done"]
+
     def test_unparseable_reprompts_without_terminating(self):
         env = ocr_tool.load_environment(scaffold="line")
         state = {"info": {"image_id": "x.png", "text": "Total: $9", "answer": "9", "fmt": "line"}, "turn": 1}

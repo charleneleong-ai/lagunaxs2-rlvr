@@ -9,10 +9,11 @@ robust to harness change instead of brittle to one tool syntax.
 Scope: single-string-arg tool calls (the tool-mediated family — ocr_tool, frontend_design). Multi-arg
 code-block tools (general_agent's executed Python) are a different paradigm and an explicit non-goal.
 
-The `poolside` format is the text dialect Laguna *actually emits in message content* when prompted for
-a tool call (`<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>` — confirmed by
-eval). That is distinct from the structured `tool_calls` field a vLLM `--tool-call-parser poolside_v1`
-server would expose; a future "native" scaffold would advertise vf tool schemas and read that field.
+The four text FORMATS vary the *content* syntax (no inference-call change). The `native` path is
+different: it advertises tool schemas to the sampler (`tool_defs=to_tool_defs(...)`) so the model emits
+structured `tool_calls`, then reads them with `parse_native` — Laguna's real `poolside_v1` deployment
+format. `native` needs a tools-capable sampler (vLLM `--tool-call-parser poolside_v1` / Harbor) to
+exercise end-to-end, so it's a whole-env mode rather than a per-row text format.
 """
 from __future__ import annotations
 
@@ -31,11 +32,12 @@ class Tool:
 
 
 def resolve_format(index: int, scaffold: str) -> str:
-    """A fixed format, or 'mixed' -> round-robin across FORMATS so a batch spans every syntax."""
+    """A fixed format, or 'mixed' -> round-robin across FORMATS so a batch spans every syntax.
+    'native' (structured tool_calls) passes through — it's an env-level mode, not round-robined."""
     if scaffold == "mixed":
         return FORMATS[index % len(FORMATS)]
-    if scaffold not in FORMATS:
-        raise ValueError(f"unknown scaffold {scaffold!r} (use one of {FORMATS} or 'mixed')")
+    if scaffold != "native" and scaffold not in FORMATS:
+        raise ValueError(f"unknown scaffold {scaffold!r} (use {FORMATS}, 'native', or 'mixed')")
     return scaffold
 
 
@@ -110,3 +112,31 @@ def _from_obj(obj: dict | None, names: dict[str, Tool]) -> tuple[str, str] | Non
         extras = [v for k, v in args.items() if k not in ("name", "tool")]
         val = extras[0] if extras else None
     return (tool.name, _clean(str(val))) if val is not None else None
+
+
+# --- native: structured tool_calls (Laguna's real poolside_v1 deployment path) -------------------
+
+def to_tool_defs(tools: list[Tool]) -> list[dict]:
+    """vf.Tool-format schemas to advertise to the sampler (env passes `tool_defs=...`) so the model
+    emits structured tool_calls instead of text. (verifiers rejects the legacy OpenAI function wrapper.)"""
+    return [{"name": t.name, "description": t.description,
+             "parameters": {"type": "object", "properties": {t.arg: {"type": "string"}}, "required": [t.arg]}}
+            for t in tools]
+
+
+def _attr(obj, key):
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+
+def parse_native(message, tools: list[Tool]) -> tuple[str, str] | None:
+    """Read a structured tool call off `message.tool_calls` (dict or pydantic Message), or None."""
+    names = {t.name.lower(): t for t in tools}
+    for call in _attr(message, "tool_calls") or []:
+        fn = _attr(call, "function")
+        if not fn or not (tool := names.get(str(_attr(fn, "name") or "").lower())):
+            continue
+        raw = _attr(fn, "arguments")
+        args = _loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else None)
+        if args and (val := args.get(tool.arg)) is not None:
+            return tool.name, _clean(str(val))
+    return None

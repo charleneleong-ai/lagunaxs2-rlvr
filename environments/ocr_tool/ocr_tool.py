@@ -19,7 +19,8 @@ from datasets import Dataset
 
 from laguna_rlvr.code_exec import message_text   # vendor before any Hub push
 from laguna_rlvr.rewards import RolloutState, binary, shaped
-from laguna_rlvr.scaffold import Tool, parse_call, render_instructions, resolve_format
+from laguna_rlvr.scaffold import (Tool, parse_call, parse_native, render_instructions,
+                                  resolve_format, to_tool_defs)
 
 # (image_id, document_text, question, answer) — multi-field docs so answering needs parsing, not echo.
 _BUILTIN_DOCS = [
@@ -73,10 +74,13 @@ class OCRToolEnv(vf.MultiTurnEnv):
         rows = []
         for i, (iid, txt, q, a) in enumerate(docs):
             fmt = resolve_format(i, scaffold)
-            question = ("You have a task about a document IMAGE you cannot see directly.\n\n"
-                        f"Task: {q}\n\n{render_instructions(_TOOLS, fmt)}")
+            instr = ("Use the available tools to read the image, then answer." if fmt == "native"
+                     else render_instructions(_TOOLS, fmt))
+            question = f"You have a task about a document IMAGE you cannot see directly.\n\nTask: {q}\n\n{instr}"
             rows.append({"question": question, "answer": a,
                          "info": {"image_id": iid, "text": txt, "answer": a, "fmt": fmt}})
+        if scaffold == "native":   # advertise structured tool schemas to the sampler
+            kwargs.setdefault("tool_defs", to_tool_defs(_TOOLS))
         super().__init__(eval_dataset=Dataset.from_list(rows),
                          rubric=vf.Rubric(funcs=[self._reward, self._success], weights=[1.0, 0.0]),
                          max_turns=max_turns, message_type="chat", **kwargs)
@@ -103,11 +107,13 @@ class OCRToolEnv(vf.MultiTurnEnv):
         return bool(state.get("done"))
 
     async def env_response(self, messages, state, **kwargs):
-        info = state["info"]
-        call = parse_call(message_text(messages[-1]), info["fmt"], _TOOLS)
+        info, last = state["info"], messages[-1]
+        call = (parse_native(last, _TOOLS) if info["fmt"] == "native"
+                else parse_call(message_text(last), info["fmt"], _TOOLS))
         if call is None:
-            return [{"role": "user", "content": "No valid tool call found.\n"
-                     + render_instructions(_TOOLS, info["fmt"])}]
+            hint = ("Call one of the available tools." if info["fmt"] == "native"
+                    else render_instructions(_TOOLS, info["fmt"]))
+            return [{"role": "user", "content": "No valid tool call found.\n" + hint}]
         name, value = call
         if name == "answer":
             state["solved"] = _match(info["answer"], value)
@@ -119,6 +125,6 @@ class OCRToolEnv(vf.MultiTurnEnv):
 
 def load_environment(max_turns: int = 4, efficiency_weight: float = 0.1,
                      scaffold: str = "mixed", **kwargs) -> vf.Environment:
-    """scaffold: 'line' | 'xml' | 'json' | 'poolside' (one tool-call syntax) or 'mixed' (round-robin → all)."""
+    """scaffold: 'line'|'xml'|'json'|'poolside' (text syntax) · 'mixed' (round-robin) · 'native' (structured tool_calls)."""
     return OCRToolEnv(_BUILTIN_DOCS, max_turns=max_turns, efficiency_weight=efficiency_weight,
                       scaffold=scaffold)
