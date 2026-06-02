@@ -51,3 +51,7 @@ run = "prime train configs/rl/laguna-xs2.toml"
 [tasks.mm-adapter-plan]
 description = "Dry-run the A100 40GB generalized adapter scaffold"
 run = "uv run python scripts/mm_adapter_plan.py configs/mm_adapter/a100-40gb-projector.toml"
+
+[tasks.preload]
+description = "Materialize real-image corpora into the on-disk cache (GPU-free, parallel encode). Args after --, e.g. `mise run preload -- cauldron_rendered_text:8000 --procs 12`"
+run = "uv run python -m laguna_rlvr.visual.preload"
