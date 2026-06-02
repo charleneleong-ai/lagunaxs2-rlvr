@@ -189,10 +189,16 @@ def main(
     a.load_adapter_state_dict(torch.load(init_ckpt, map_location=a.llm.device))
     print(f"warm-started from {init_ckpt}", flush=True)
 
+    # Mirror SFT's seeded 90/10 split (train.py): RL trains on train_ds, evals on the held-out val_ds.
+    # The old eval (first 40 of the unshuffled full corpus) was corpus-skewed — it read 0.000 while
+    # SFT's random val span read ~0.13, so the "qa_acc flat" verdict was measured on a broken yardstick.
     full = QASFTDataset(build_corpus("mix", n_train), vqa_sources=load_vqa(DEFAULT_VQA, n_train))
-    items = [(full[i][0], full[i][3] or read_question(CORPUS_KIND.get(full[i][2])), full[i][1])
-             for i in range(len(full))]  # (image, question, needle)
-    eval_items = [full[i] for i in range(min(40, len(full)))]
+    n_val = min(max(1, len(full) // 10), 256)
+    train_ds, val_ds = torch.utils.data.random_split(
+        full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
+    items = [(train_ds[i][0], train_ds[i][3] or read_question(CORPUS_KIND.get(train_ds[i][2])), train_ds[i][1])
+             for i in range(len(train_ds))]  # (image, question, needle)
+    eval_items = [val_ds[i] for i in range(min(40, len(val_ds)))]  # held-out, matches SFT's qa_eval_items
     print(f"GSPO over {len(items)} items | reward={reward} mode={mode} G={group_size} batch={batch}", flush=True)
 
     run_name = f"{encoder}__{Path(base).name}__{name_suffix}"
