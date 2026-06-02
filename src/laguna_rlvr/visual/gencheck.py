@@ -12,7 +12,7 @@ from __future__ import annotations
 import torch
 import typer
 
-from laguna_rlvr.visual.corpora import build_corpus, extract_needle, load_vqa, read_question
+from laguna_rlvr.visual.corpora import load_text_image, extract_needle, load_vqa, read_question
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.model import IMAGE_TOKEN, VisualAdapter
 from laguna_rlvr.visual.multiturn_qa import _match
@@ -38,7 +38,7 @@ def main(
                       use_anchor=anchor, unfreeze=unfreeze)
     a.load_adapter_state_dict(torch.load(ckpt, map_location=a.llm.device))
     a.eval()
-    print("embed_norm:", round(a.embedding_norm_ratio([build_corpus("synthetic", 1)[0][0]]), 3), flush=True)
+    print("embed_norm:", round(a.embedding_norm_ratio([load_text_image("synthetic", 1)[0][0]]), 3), flush=True)
 
     @torch.no_grad()
     def ask(img, q: str) -> str:
@@ -48,7 +48,7 @@ def main(
 
     probes = []  # (corpus, image, question, true_answer)
     for c in ("synthetic", "webcode2m", "websight", "design2code"):
-        ds = build_corpus(c, n + 2)
+        ds = load_text_image(c, n + 2)
         for i in range(n):
             true = ds[i][1] if c == "synthetic" else extract_needle(ds[i][1], "html")
             if true:

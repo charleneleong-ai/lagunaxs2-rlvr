@@ -1,11 +1,11 @@
 import pytest
 
-from laguna_rlvr.visual.corpora import build_corpus
+from laguna_rlvr.visual.corpora import load_text_image
 from laguna_rlvr.visual.data import SyntheticOCR
 
 
-def test_build_corpus_dispatches_synthetic():  # offline — no network/model
-    ds = build_corpus("synthetic", 8)
+def test_load_text_image_dispatches_synthetic():  # offline — no network/model
+    ds = load_text_image("synthetic", 8)
     assert isinstance(ds, SyntheticOCR) and len(ds) == 8
 
 
@@ -20,8 +20,8 @@ def test_align_mix_is_registered_and_reading_biased():
     assert max(_ALIGN_MIX, key=lambda kv: kv[1])[0] == "synthetic"  # synthetic the largest single anchor
 
 
-def test_build_corpus_align_dispatches_to_mixture():  # offline — override to synthetic-only
-    ds = build_corpus("align", 8, mixture=[("synthetic", 1.0)])
+def test_load_text_image_align_dispatches_to_mixture():  # offline — override to synthetic-only
+    ds = load_text_image("align", 8, mixture=[("synthetic", 1.0)])
     assert len(ds) == 8 and ds[0][2] == "synthetic"
 
 
@@ -41,9 +41,9 @@ def test_cauldron_dataset_extracts_image_and_transcription(tmp_path, monkeypatch
     assert txt == "line 0"  # first turn's assistant becomes the recon transcription target
 
 
-def test_build_corpus_unknown_raises():
+def test_load_text_image_unknown_raises():
     with pytest.raises(ValueError):
-        build_corpus("nope", 4)
+        load_text_image("nope", 4)
 
 
 def test_parse_mixture():

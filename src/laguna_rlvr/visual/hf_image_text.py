@@ -44,16 +44,39 @@ def _cached_or_stream(key: str, stream_fn: Callable[[], HFDataset]) -> HFDataset
 _IMG_TEXT_FEATURES = Features({"image": HFImage(), "text": Value("string")})
 
 
-def _shard_plan(n: int, offset: int) -> dict:
-    """Plan parallel encode via LAGUNA_DATASET_PROCS. The Arrow image encode (~0.3s/img, single-core)
-    dominates materialization, so fan it across processes: each worker takes one file-level shard
-    (IterableDataset.shard — no row-skip) and encodes per_shard rows. Only when offset==0 (the training
-    range) — a held-out offset slice can't be file-sharded cleanly, so it stays serial."""
+def _n_shards(repo: str, config: str | None = None, split: str = "train") -> int:
+    """The dataset's file-shard count (cheap metadata-only streaming init). Caps parallel workers so we
+    never ask IterableDataset.shard for more shards than files — it raises otherwise (caught on ChartQA)."""
+    try:
+        return load_dataset(repo, config, split=split, streaming=True).n_shards
+    except Exception:
+        return 1
+
+
+def _shard_plan(n: int, offset: int, n_files=None) -> tuple[int | None, dict]:
+    """Plan parallel encode via LAGUNA_DATASET_PROCS -> (num_proc, shard gen_kwargs). The Arrow image
+    encode (~0.3s/img, single-core) dominates materialization, so fan it across processes: each worker
+    takes one file-level shard (IterableDataset.shard — no row-skip) and encodes per_shard rows. `n_files`
+    is a thunk peeked only on the parallel path (caps workers at the dataset's shard count). Serial when
+    offset>0 (a held-out slice can't be file-sharded cleanly)."""
     procs = max(1, int(os.environ.get("LAGUNA_DATASET_PROCS", "1")))
+    if n_files is not None and procs > 1:
+        procs = min(procs, n_files())
     if procs <= 1 or offset or n < 2 * procs:
-        return dict(shard_idx=[0], num_shards=1, per_shard=n, offset=offset, num_proc=None)
-    return dict(shard_idx=list(range(procs)), num_shards=procs, per_shard=-(-n // procs),
-                offset=0, num_proc=procs)
+        return None, dict(shard_idx=[0], num_shards=1, per_shard=n, offset=offset)
+    return procs, dict(shard_idx=list(range(procs)), num_shards=procs, per_shard=-(-n // procs), offset=0)
+
+
+def _materialize(gen, features: Features, *, n: int, offset: int, n_files, error: str, **row_kwargs) -> HFDataset:
+    """Stream `gen` into a disk-backed HFDataset via from_generator — writes Arrow shards incrementally
+    (one image in flight: low memory + scalable) with optional file-sharded parallel encode (_shard_plan).
+    Replaces the from_dict path that held all N decoded images in RAM and encoded in one monolithic pass
+    (~24GB, stalled training/preload at N=8000, 2026-06-02). `row_kwargs` are the loader's own columns."""
+    num_proc, shard = _shard_plan(n, offset, n_files)
+    ds = HFDataset.from_generator(gen, features=features, num_proc=num_proc, gen_kwargs={**shard, **row_kwargs})
+    if len(ds) == 0:
+        raise RuntimeError(error)
+    return ds
 
 
 def _image_text_rows(*, shard_idx, num_shards, per_shard, offset, repo, config, split,
@@ -130,18 +153,11 @@ class HFImageTextDataset(Dataset):
     @staticmethod
     def _stream(repo: str, config: str | None, split: str, n: int, offset: int,
                 image_col: str, text_col: str, max_text_chars: int) -> HFDataset:
-        # from_generator writes Arrow shards incrementally (one image in flight) — low memory + scalable.
-        # from_dict held all N decoded images in RAM + encoded in one monolithic pass: ~24GB + single-shot
-        # encode at N=8000 stalled training/preload (2026-06-02). _shard_plan adds optional parallel encode.
-        p = _shard_plan(n, offset)
-        ds = HFDataset.from_generator(
-            _image_text_rows, features=_IMG_TEXT_FEATURES, num_proc=p["num_proc"],
-            gen_kwargs=dict(shard_idx=p["shard_idx"], num_shards=p["num_shards"], per_shard=p["per_shard"],
-                            offset=p["offset"], repo=repo, config=config, split=split,
-                            image_col=image_col, text_col=text_col, max_text_chars=max_text_chars))
-        if len(ds) == 0:
-            raise RuntimeError(f"no usable rows from {repo} (cols {image_col!r}/{text_col!r})")
-        return ds
+        return _materialize(_image_text_rows, _IMG_TEXT_FEATURES, n=n, offset=offset,
+                            n_files=lambda: _n_shards(repo, config, split),
+                            error=f"no usable rows from {repo} (cols {image_col!r}/{text_col!r})",
+                            repo=repo, config=config, split=split,
+                            image_col=image_col, text_col=text_col, max_text_chars=max_text_chars)
 
     def __len__(self) -> int:
         return len(self._ds)
@@ -165,15 +181,10 @@ class CauldronDataset(Dataset):
 
     @staticmethod
     def _stream(config, split, n, offset, max_text_chars) -> HFDataset:
-        # incremental + optional parallel encode (see HFImageTextDataset._stream / _shard_plan)
-        p = _shard_plan(n, offset)
-        ds = HFDataset.from_generator(
-            _cauldron_rows, features=_IMG_TEXT_FEATURES, num_proc=p["num_proc"],
-            gen_kwargs=dict(shard_idx=p["shard_idx"], num_shards=p["num_shards"], per_shard=p["per_shard"],
-                            offset=p["offset"], config=config, split=split, max_text_chars=max_text_chars))
-        if len(ds) == 0:
-            raise RuntimeError(f"no usable rows from the_cauldron/{config}")
-        return ds
+        return _materialize(_cauldron_rows, _IMG_TEXT_FEATURES, n=n, offset=offset,
+                            n_files=lambda: _n_shards("HuggingFaceM4/the_cauldron", config, split),
+                            error=f"no usable rows from the_cauldron/{config}",
+                            config=config, split=split, max_text_chars=max_text_chars)
 
     def __len__(self) -> int:
         return len(self._ds)
@@ -198,15 +209,11 @@ class VQADataset(Dataset):
 
     @staticmethod
     def _stream(repo, config, split, n, offset, image_col, q_col, a_col, paired) -> HFDataset:
-        p = _shard_plan(n, offset)  # incremental + optional parallel encode (see HFImageTextDataset)
-        ds = HFDataset.from_generator(
-            _vqa_rows, features=_VQA_FEATURES, num_proc=p["num_proc"],
-            gen_kwargs=dict(shard_idx=p["shard_idx"], num_shards=p["num_shards"], per_shard=p["per_shard"],
-                            offset=p["offset"], repo=repo, config=config, split=split,
-                            image_col=image_col, q_col=q_col, a_col=a_col, paired=paired))
-        if len(ds) == 0:
-            raise RuntimeError(f"no usable rows from {repo} (cols {image_col!r}/{q_col!r}/{a_col!r})")
-        return ds
+        return _materialize(_vqa_rows, _VQA_FEATURES, n=n, offset=offset,
+                            n_files=lambda: _n_shards(repo, config, split),
+                            error=f"no usable rows from {repo} (cols {image_col!r}/{q_col!r}/{a_col!r})",
+                            repo=repo, config=config, split=split,
+                            image_col=image_col, q_col=q_col, a_col=a_col, paired=paired)
 
     def __len__(self) -> int:
         return len(self._ds)
@@ -230,14 +237,9 @@ class ScreenSpotDataset(Dataset):
 
     @staticmethod
     def _stream(repo, split, n, offset) -> HFDataset:
-        p = _shard_plan(n, offset)  # incremental + optional parallel (consistent with the other loaders)
-        ds = HFDataset.from_generator(
-            _screenspot_rows, features=_VQA_FEATURES, num_proc=p["num_proc"],
-            gen_kwargs=dict(shard_idx=p["shard_idx"], num_shards=p["num_shards"], per_shard=p["per_shard"],
-                            offset=p["offset"], repo=repo, split=split))
-        if len(ds) == 0:
-            raise RuntimeError(f"no usable rows from {repo}")
-        return ds
+        return _materialize(_screenspot_rows, _VQA_FEATURES, n=n, offset=offset,
+                            n_files=lambda: _n_shards(repo, split=split),
+                            error=f"no usable rows from {repo}", repo=repo, split=split)
 
     def __len__(self) -> int:
         return len(self._ds)

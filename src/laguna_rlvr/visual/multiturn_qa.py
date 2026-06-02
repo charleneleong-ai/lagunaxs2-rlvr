@@ -6,7 +6,7 @@ Two episode sources:
 - **mixture**: episodes grounded in the real training corpora (the same screenshots/charts the model
   faces), with verifiability preserved by a needle extracted from each paired label (chart/page title
   via `extract_needle`). Persisted to `data/multiturn_qa.jsonl` so the benchmark is fixed + inspectable;
-  images are re-fetched by `build_corpus(corpus)[idx]` (stable row order), so the manifest stays tiny.
+  images are re-fetched by `load_text_image(corpus)[idx]` (stable row order), so the manifest stays tiny.
 
 Each 3-turn episode reads image A, reads image B, then a text-only follow-up that must recall A's
 needle. Scored `qa/metrics/accuracy` (per-turn reading) + `qa/metrics/recall` (cross-turn memory) by
@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from laguna_rlvr.visual.baseline import _QA_GEN_TOKENS, glm_ocr_transcribe, text_chat
-from laguna_rlvr.visual.corpora import CORPUS_KIND, build_corpus, extract_needle, read_question
+from laguna_rlvr.visual.corpora import CORPUS_KIND, load_text_image, extract_needle, read_question
 from laguna_rlvr.visual.data import render_text
 from laguna_rlvr.visual.model import IMAGE_TOKEN, Turn, VisualAdapter
 
@@ -96,7 +96,7 @@ def mixture_episodes(n: int, corpora: list[str] = _QA_CORPORA, per_corpus: int =
     refs: list[QARef] = []
     for corpus in corpora:
         kind = CORPUS_KIND.get(corpus)
-        ds = build_corpus(corpus, per_corpus)
+        ds = load_text_image(corpus, per_corpus)
         for idx in range(len(ds)):
             if needle := extract_needle(ds[idx][1], kind):
                 refs.append(QARef(corpus, idx, needle, kind))
@@ -126,7 +126,7 @@ def image_fetcher(episodes: list[Episode]):
         if ref.corpus == "synthetic":
             return render_text(ref.needle, seed=ref.idx)
         if ref.corpus not in cache:
-            cache[ref.corpus] = build_corpus(ref.corpus, _PER_CORPUS)
+            cache[ref.corpus] = load_text_image(ref.corpus, _PER_CORPUS)
         return cache[ref.corpus][ref.idx][0]
 
     return fetch
