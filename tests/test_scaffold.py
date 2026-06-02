@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from scaffold_emit import emit_call as _emit
 
@@ -65,6 +67,11 @@ class TestNative:
     def test_parse_native_dict_message(self):
         msg = {"tool_calls": [{"function": {"name": "ocr", "arguments": '{"image_id": "a.png"}'}}]}
         assert parse_native(msg, _TOOLS) == ("ocr", "a.png")
+
+    def test_parse_native_flat_json_string_call(self):
+        # the shape verifiers/prime actually returns: a JSON string, name/arguments at top level
+        call = json.dumps({"id": "x", "name": "ocr", "arguments": json.dumps({"image_id": "a.png"})})
+        assert parse_native({"tool_calls": [call]}, _TOOLS) == ("ocr", "a.png")
 
     def test_parse_native_object_message_with_dict_args(self):
         fn = type("Fn", (), {"name": "answer", "arguments": {"value": "42"}})()

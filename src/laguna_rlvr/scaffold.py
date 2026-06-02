@@ -129,11 +129,17 @@ def _attr(obj, key):
 
 
 def parse_native(message, tools: list[Tool]) -> tuple[str, str] | None:
-    """Read a structured tool call off `message.tool_calls` (dict or pydantic Message), or None."""
+    """Read a structured tool call off `message.tool_calls`, or None.
+
+    Tolerates both shapes seen in the wild: verifiers' flat JSON-string call
+    (`{"name": ..., "arguments": "{...}"}`) and the nested OpenAI form (`{"function": {"name", "arguments"}}`).
+    """
     names = {t.name.lower(): t for t in tools}
     for call in _attr(message, "tool_calls") or []:
-        fn = _attr(call, "function")
-        if not fn or not (tool := names.get(str(_attr(fn, "name") or "").lower())):
+        if isinstance(call, str):
+            call = _loads(call) or {}
+        fn = _attr(call, "function") or call   # nested OpenAI, or flat (name/arguments at top level)
+        if not (tool := names.get(str(_attr(fn, "name") or "").lower())):
             continue
         raw = _attr(fn, "arguments")
         args = _loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else None)

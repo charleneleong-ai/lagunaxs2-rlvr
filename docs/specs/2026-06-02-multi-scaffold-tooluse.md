@@ -40,17 +40,21 @@ round-robins them. An env threads the chosen `fmt` through `info` and calls `ren
 *teach* Laguna the syntaxes it doesn't know natively (Hermes) while reinforcing the ones it does. The
 result is a policy robust to harness change instead of tuned to one tool layout.
 
-## Native scaffold (prototype)
+## Native scaffold — works on the Prime endpoint (no Harbor needed)
 `scaffold="native"` is the real Pool/ACP path: the env advertises tool schemas (`to_tool_defs` →
-verifiers `tool_defs`, vf.Tool format — *not* the legacy OpenAI `{type,function}` wrapper, which
+verifiers `tool_defs`, **vf.Tool format** — *not* the legacy OpenAI `{type,function}` wrapper, which
 verifiers rejects) so the model emits structured `tool_calls`, read by `parse_native` instead of text.
-It's an env-level mode (not round-robined into `mixed`, since it needs schema advertisement). Wired into
-`ocr_tool`; the loop is unit-tested with synthetic `tool_calls`. Live Laguna eval needs a tools-capable
-endpoint (vLLM `--tool-call-parser poolside_v1` / Harbor) — the plain Prime endpoint didn't surface a
-structured-call run, so end-to-end native is the remaining validation.
+Env-level mode (not round-robined into `mixed`, since it needs schema advertisement).
+
+**Validated end-to-end on hosted Laguna XS.2 (Prime inference): 4/4 (reward 1.1, 3 turns).** The Prime
+endpoint already supports function-calling — `tool_defs` advertised, Laguna returned a real structured
+call. The one gotcha: verifiers returns tool_calls in a **flat JSON-string shape** (`{"name","arguments"}`
+at top level, the call a JSON string), *not* the nested OpenAI `{"function":{...}}` form — `parse_native`
+tolerates both. So no separate vLLM `poolside_v1` / Harbor endpoint is required.
+
+Full Laguna table now: `line` 4/4 · `json` 4/4 · `poolside`(text) 4/4 · **`native`(structured) 4/4** ·
+`xml`(Hermes) 0/4 · `mixed` 3/4.
 
 ## Next
-- ✅ `frontend_design` wired (single-arg `read_design`); ✅ `native` prototyped; ✅ dead
-  `swe_multilingual`/`terminal_bench_curated` env stubs removed.
-- Validate `native` end-to-end against a poolside_v1 / Harbor endpoint.
+- ✅ `frontend_design` wired; ✅ `native` works on Prime; ✅ dead env stubs removed.
 - RL `ocr_tool`/`frontend_design` with `scaffold="mixed"` on the free Laguna slot.
