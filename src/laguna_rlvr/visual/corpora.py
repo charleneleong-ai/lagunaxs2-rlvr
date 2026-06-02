@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from torch.utils.data import Dataset
 
@@ -222,8 +223,11 @@ DEFAULT_VQA = list(VQA_SPECS)  # all registered VQA reading sets — on by defau
 
 
 def load_vqa(names: list[str], n: int) -> list[tuple]:
-    from laguna_rlvr.visual.hf_image_text import VQADataset
-    return [(VQADataset(n=n, **VQA_SPECS[name]), name) for name in names]
+    from laguna_rlvr.visual.hf_image_text import VQADataset  # local: lazy heavy-dep, matches the builders
+    # Each VQA set is an independent disk/stream materialization (I/O-bound); load them concurrently in a
+    # thread pool to overlap the startup loads instead of paying them serially. ex.map preserves order.
+    with ThreadPoolExecutor(max_workers=max(1, len(names))) as ex:
+        return list(ex.map(lambda name: (VQADataset(n=n, **VQA_SPECS[name]), name), names))
 
 
 def parse_mixture(spec: str) -> list[tuple[str, float]]:
