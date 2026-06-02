@@ -82,6 +82,26 @@ def _cauldron_rows(*, shard_idx, num_shards, per_shard, offset, config, split, m
                 yield {"image": images[0].convert("RGB"), "text": texts[0]["assistant"][:max_text_chars]}
 
 
+_VQA_FEATURES = Features({"image": HFImage(), "question": Value("string"), "answer": Value("string")})
+
+
+def _vqa_rows(*, shard_idx, num_shards, per_shard, offset, repo, config, split, image_col, q_col, a_col, paired):
+    """Yield {image, question, answer} rows from a VQA set — for from_generator (incremental, parallel)."""
+    for i in shard_idx:
+        base = load_dataset(repo, config, split=split, streaming=True)
+        rows = islice(base.shard(num_shards, i), per_shard) if num_shards > 1 else \
+            islice(base, offset, offset + per_shard)
+        for row in track(rows, total=per_shard, description=f"{repo} shard {i}"):
+            img, q, a = row.get(image_col), row.get(q_col), row.get(a_col)
+            if paired:  # q_col/a_col are PARALLEL lists (multiple Q&A per image, e.g. OCR-VQA): first pair
+                q = q[0] if isinstance(q, list) and q else q
+                a = a[0] if isinstance(a, list) and a else a
+            else:  # a_col is a list of annotator answers to the single question -> majority vote
+                a = Counter(a).most_common(1)[0][0] if isinstance(a, list) and a else a
+            if img is not None and q and a:
+                yield {"image": img.convert("RGB"), "question": q, "answer": a}
+
+
 class HFImageTextDataset(Dataset):
     """(screenshot, code) pairs streamed from an HF dataset (embedded image + text), cached to disk."""
 
@@ -164,24 +184,15 @@ class VQADataset(Dataset):
 
     @staticmethod
     def _stream(repo, config, split, n, offset, image_col, q_col, a_col, paired) -> HFDataset:
-        stream = load_dataset(repo, config, split=split, streaming=True)
-        imgs, qs, ans = [], [], []
-        for row in track(islice(stream, offset, offset + n), total=n, description=f"{repo} ({n})"):
-            img, q, a = row.get(image_col), row.get(q_col), row.get(a_col)
-            if paired:  # q_col/a_col are PARALLEL lists (multiple Q&A per image, e.g. OCR-VQA): first pair
-                q = q[0] if isinstance(q, list) and q else q
-                a = a[0] if isinstance(a, list) and a else a
-            else:  # a_col is a list of annotator answers to the single question -> majority vote
-                a = Counter(a).most_common(1)[0][0] if isinstance(a, list) and a else a
-            if img is not None and q and a:
-                imgs.append(img.convert("RGB"))
-                qs.append(q)
-                ans.append(a)
-        if not imgs:
+        p = _shard_plan(n, offset)  # incremental + optional parallel encode (see HFImageTextDataset)
+        ds = HFDataset.from_generator(
+            _vqa_rows, features=_VQA_FEATURES, num_proc=p["num_proc"],
+            gen_kwargs=dict(shard_idx=p["shard_idx"], num_shards=p["num_shards"], per_shard=p["per_shard"],
+                            offset=p["offset"], repo=repo, config=config, split=split,
+                            image_col=image_col, q_col=q_col, a_col=a_col, paired=paired))
+        if len(ds) == 0:
             raise RuntimeError(f"no usable rows from {repo} (cols {image_col!r}/{q_col!r}/{a_col!r})")
-        return HFDataset.from_dict(
-            {"image": imgs, "question": qs, "answer": ans},
-            features=Features({"image": HFImage(), "question": Value("string"), "answer": Value("string")}))
+        return ds
 
     def __len__(self) -> int:
         return len(self._ds)
