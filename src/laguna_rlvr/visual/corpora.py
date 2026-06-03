@@ -250,7 +250,11 @@ DEFAULT_VQA = list(VQA_SPECS)  # all registered VQA reading sets — on by defau
 
 # the_cauldron general image-dependent VQA (Stage-2). okvqa excluded: its images are dangling
 # /fsx/... path refs (not bundled), so HF's lazy decode hits FileNotFoundError (2026-06-03).
-CAULDRON_VQA = ["vqav2", "visual7w"]
+CAULDRON_VQA = ["vqav2", "visual7w",
+                "dvqa", "figureqa", "plotqa", "chart2text",            # chart
+                "robut_wtq", "tabmwp", "finqa", "hitab",               # table
+                "visualmrc", "infographic_vqa",                        # document
+                "aokvqa", "vsr", "ai2d", "scienceqa"]                  # reasoning (all load-verified 2026-06-03)
 
 
 def _resolve_vqa(name: str) -> str:
@@ -276,17 +280,21 @@ def load_vqa(names: list[str], n: int) -> list[tuple]:
     return [build(name) for name in names]
 
 
-# Task -> datasets lookup: declare target capabilities (--tasks vqa,design) and compose_sft expands them
-# into the SFT config. `mode` selects how each dataset is consumed: vqa (native q/a -> vqa_sources),
-# codegen (full code answer -> base mix + design_codegen), ocr/caption (needle/recon -> base mix).
-# Phase 1: only load-verified datasets. Add chart/document/table/reasoning after verifying their configs
-# (the_cauldron configs can have dangling image paths -> preload crash, cf. okvqa 2026-06-03).
+# Task -> datasets lookup: declare target capabilities (--tasks vqa,design,chart) and compose_sft expands
+# them into the SFT config. `mode` selects how each dataset is consumed: vqa (native q/a -> vqa_sources),
+# codegen (full code answer -> base mix + design_codegen), ocr/caption (needle/recon -> base mix). All
+# datasets are load-verified (the_cauldron configs can have dangling image paths -> preload crash, cf.
+# okvqa 2026-06-03; chart/table/document/reasoning configs verified 2026-06-03).
 TASKS: dict[str, dict] = {
-    "caption": {"mode": "caption", "datasets": ["cauldron_localized_narratives", "cauldron_textcaps",
-                                                "cauldron_screen2words"]},
-    "vqa":     {"mode": "vqa",     "datasets": ["vqav2", "visual7w", "textvqa", "docvqa", "chartqa", "ocrvqa"]},
-    "design":  {"mode": "codegen", "datasets": ["websight", "webcode2m"]},
-    "ocr":     {"mode": "ocr",     "datasets": ["synthetic", "cauldron_rendered_text"]},
+    "caption":   {"mode": "caption", "datasets": ["cauldron_localized_narratives", "cauldron_textcaps",
+                                                  "cauldron_screen2words"]},
+    "vqa":       {"mode": "vqa",     "datasets": ["vqav2", "visual7w", "textvqa", "docvqa", "chartqa", "ocrvqa"]},
+    "design":    {"mode": "codegen", "datasets": ["websight", "webcode2m"]},
+    "ocr":       {"mode": "ocr",     "datasets": ["synthetic", "cauldron_rendered_text"]},
+    "chart":     {"mode": "vqa",     "datasets": ["chartqa", "dvqa", "figureqa", "plotqa", "chart2text"]},
+    "table":     {"mode": "vqa",     "datasets": ["robut_wtq", "tabmwp", "finqa", "hitab"]},
+    "document":  {"mode": "vqa",     "datasets": ["docvqa", "infographic_vqa", "visualmrc"]},
+    "reasoning": {"mode": "vqa",     "datasets": ["aokvqa", "vsr", "ai2d", "scienceqa"]},
 }
 
 
@@ -311,6 +319,9 @@ def compose_sft(task_names: list[str]) -> dict:
                     raise ValueError(f"task {t!r} dataset {d!r} not in REGISTRY")
                 mix.append((d, 1.0))
             codegen = codegen or spec["mode"] == "codegen"
+    # dedup: overlapping tasks (e.g. vqa+chart both list chartqa) must not double-load a set
+    vqa = list(dict.fromkeys(vqa))
+    mix = list(dict.fromkeys(mix))
     return {"mix": mix or None, "vqa": vqa, "design_codegen": codegen}
 
 
