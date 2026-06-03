@@ -184,3 +184,5 @@ def test_compose_sft_merges_tasks_into_mix_vqa_codegen():
     assert ("websight", 1.0) in c["mix"] and ("webcode2m", 1.0) in c["mix"]  # design -> base mix corpora
     assert "vqav2" in c["vqa"] and "textvqa" in c["vqa"]                      # vqa -> vqa sources
     assert c["design_codegen"] is True                                       # design is codegen mode
+    # vqa + chart both list chartqa -> deduped to one
+    assert compose_sft(["vqa", "chart"])["vqa"].count("chartqa") == 1
