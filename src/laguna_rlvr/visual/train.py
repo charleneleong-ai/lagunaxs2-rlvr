@@ -143,7 +143,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           qa_eval: bool = True, description: str = "", init_projector: str = "",
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
           lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0,
-          qa_eval_n: int = 40) -> Path:
+          qa_eval_n: int = 40, lora_rank: int = 16) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -161,7 +161,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
 
     enc = load_encoder(encoder, pool=pool)
     adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze,
-                            use_anchor=use_anchor, norm_penalty=norm_penalty)
+                            use_anchor=use_anchor, norm_penalty=norm_penalty, lora_rank=lora_rank)
     opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
 
     # Mixture weights: explicit --mixture always wins. Otherwise the config's [mixture].weights is the
@@ -443,10 +443,11 @@ def main(
     vqa: str = typer.Option("default", help="VQA reading sets for QA-SFT: 'default'=all, comma-list, or '' = none"),
     norm_penalty: float = typer.Option(0.0, help="soft cap on projected-token scale (--no-anchor ballooning)"),
     qa_eval_n: int = typer.Option(40, help="# val items scored for qa_acc each eval (bigger = less noisy, slower)"),
+    lora_rank: int = typer.Option(16, help="attention-LoRA rank (alpha=2r); raise to test if capacity caps reading"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n)
+          objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n, lora_rank)
 
 
 if __name__ == "__main__":
