@@ -163,3 +163,20 @@ def test_qasft_dataset_extracts_needle_triples():
     # (image, needle, corpus, question) — question is "" for needle-extracted rows (set only for VQA)
     assert ds[0] == ("imgA", "Sales", "chartmimic", "")
     assert ds[1] == ("imgB", "Home", "design2code", "")
+
+
+def test_qasft_design_codegen_uses_full_code_and_prompt():
+    from laguna_rlvr.visual.corpora import QASFTDataset, TASK_PROMPT
+
+    class _Base:  # html/python rows + a non-code row
+        rows = [("imgA", "<html><h1>Hi</h1></html>", "design2code"),  # html -> code-gen
+                ("imgB", 'ax.set_title("Sales")', "chartmimic"),       # python -> code-gen
+                ("imgC", "prose", "swebench_mm")]                       # kind None -> dropped
+        def __len__(self): return len(self.rows)
+        def __getitem__(self, i): return self.rows[i]
+
+    ds = QASFTDataset(_Base(), design_codegen=True)
+    assert len(ds) == 2  # the two code rows; swebench prose has no kind -> dropped
+    # full code is the answer, asked via the kind's generation prompt (not the title-needle)
+    assert ds[0] == ("imgA", "<html><h1>Hi</h1></html>", "design2code", TASK_PROMPT["html"])
+    assert ds[1] == ("imgB", 'ax.set_title("Sales")', "chartmimic", TASK_PROMPT["python"])

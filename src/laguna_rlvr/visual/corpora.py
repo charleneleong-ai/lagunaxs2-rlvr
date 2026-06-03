@@ -193,35 +193,41 @@ class QASFTDataset(Dataset):
     ("mix", n)` (its rows carry the corpus tag needed to pick the kind/question).
     """
 
-    def __init__(self, base: Dataset, vqa_sources: list | None = None):
+    def __init__(self, base: Dataset, vqa_sources: list | None = None, design_codegen: bool = False):
         # Store (source, index) refs and decode the image lazily in __getitem__ — the DataLoader workers
         # then parallelize decode and the Arrow store stays mmap-shared on fork, instead of one process
         # eagerly decoding ~50k PILs into a list (73GB RSS -> OOM at n_train=16000, 2026-06-02). Needles
         # are filtered up front from the text labels (cheap column reads, no image decode).
-        self._refs: list[tuple] = []  # (source, idx, corpus, is_vqa, needle)
+        self._refs: list[tuple] = []  # (source, idx, corpus, is_vqa, question, answer)
         if hasattr(base, "text_labels"):
             labels = base.text_labels()
         else:
             labels = [(r[1], r[2] if len(r) > 2 else None) for r in (base[i] for i in range(len(base)))]
         for i, (text, corpus) in enumerate(labels):
-            # SyntheticOCR's label IS the visible rendered text -> a clean, diverse, fully-visible reading
-            # needle (vs websight's guessable template / webcode2m's off-page <title>); keep it by name
-            # here rather than via CORPUS_KIND (which would mis-route its generation-metric token budget).
-            needle = (text.strip() or None) if corpus == "synthetic" else extract_needle(text, CORPUS_KIND.get(corpus))
-            if needle:
-                self._refs.append((base, i, corpus, False, needle))
+            kind = CORPUS_KIND.get(corpus)
+            if design_codegen and kind in ("html", "python") and text and text.strip():
+                # Frontend-design code generation: the FULL code label is the answer, asked via the kind's
+                # generation prompt (TASK_PROMPT). Replaces the dead title-needle task (websight/webcode2m
+                # titles read ~0) with the real screenshot->code task that the design capability needs.
+                self._refs.append((base, i, corpus, False, TASK_PROMPT[kind], text.strip()))
+            else:
+                # SyntheticOCR's label IS the visible rendered text -> a clean, fully-visible reading needle
+                # (vs websight's guessable template / webcode2m's off-page <title>); keep it by name here.
+                needle = (text.strip() or None) if corpus == "synthetic" else extract_needle(text, kind)
+                if needle:
+                    self._refs.append((base, i, corpus, False, "", needle))
         for vqa, name in (vqa_sources or []):  # native (image, question, answer) reading supervision
-            self._refs += [(vqa, j, f"vqa/{name}", True, None) for j in range(len(vqa))]
+            self._refs += [(vqa, j, f"vqa/{name}", True, None, None) for j in range(len(vqa))]
 
     def __len__(self) -> int:
         return len(self._refs)
 
     def __getitem__(self, i: int):  # (image, answer, corpus, question); "" question -> per-kind default
-        src, idx, corpus, is_vqa, needle = self._refs[i]
+        src, idx, corpus, is_vqa, question, answer = self._refs[i]
         if is_vqa:
             img, q, ans = src[idx]
             return img, ans, corpus, q
-        return src[idx][0], needle, corpus, ""
+        return src[idx][0], answer, corpus, question
 
 
 # VQA reading sets — (image, per-example question, answer) where the answer is short visible text in

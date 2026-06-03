@@ -143,7 +143,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           qa_eval: bool = True, description: str = "", init_projector: str = "",
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
           lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0,
-          qa_eval_n: int = 40, lora_rank: int = 16) -> Path:
+          qa_eval_n: int = 40, lora_rank: int = 16, design_codegen: bool = False) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -177,7 +177,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     full = load_text_image(dataset, n_train, mixture=mix_specs)
     if objective == "qa":  # QA-SFT: (image, answer, corpus, question) from needle rows + VQA reading sets
         vqa_names = DEFAULT_VQA if vqa == "default" else [s for s in vqa.split(",") if s]
-        full = QASFTDataset(full, vqa_sources=load_vqa(vqa_names, n_train) if vqa_names else None)
+        full = QASFTDataset(full, vqa_sources=load_vqa(vqa_names, n_train) if vqa_names else None,
+                            design_codegen=design_codegen)
     n_val = min(max(1, len(full) // 10), 256)  # 90/10 split, capped so frequent val stays cheap
     train_ds, val_ds = torch.utils.data.random_split(
         full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
@@ -444,10 +445,11 @@ def main(
     norm_penalty: float = typer.Option(0.0, help="soft cap on projected-token scale (--no-anchor ballooning)"),
     qa_eval_n: int = typer.Option(40, help="# val items scored for qa_acc each eval (bigger = less noisy, slower)"),
     lora_rank: int = typer.Option(16, help="attention-LoRA rank (alpha=2r); raise to test if capacity caps reading"),
+    design_codegen: bool = typer.Option(False, help="train html/python corpora as screenshot->code generation (full code answer) vs title-reading"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n, lora_rank)
+          objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n, lora_rank, design_codegen)
 
 
 if __name__ == "__main__":
