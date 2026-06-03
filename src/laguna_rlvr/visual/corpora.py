@@ -276,6 +276,44 @@ def load_vqa(names: list[str], n: int) -> list[tuple]:
     return [build(name) for name in names]
 
 
+# Task -> datasets lookup: declare target capabilities (--tasks vqa,design) and compose_sft expands them
+# into the SFT config. `mode` selects how each dataset is consumed: vqa (native q/a -> vqa_sources),
+# codegen (full code answer -> base mix + design_codegen), ocr/caption (needle/recon -> base mix).
+# Phase 1: only load-verified datasets. Add chart/document/table/reasoning after verifying their configs
+# (the_cauldron configs can have dangling image paths -> preload crash, cf. okvqa 2026-06-03).
+TASKS: dict[str, dict] = {
+    "caption": {"mode": "caption", "datasets": ["cauldron_localized_narratives", "cauldron_textcaps",
+                                                "cauldron_screen2words"]},
+    "vqa":     {"mode": "vqa",     "datasets": ["vqav2", "visual7w", "textvqa", "docvqa", "chartqa", "ocrvqa"]},
+    "design":  {"mode": "codegen", "datasets": ["websight", "webcode2m"]},
+    "ocr":     {"mode": "ocr",     "datasets": ["synthetic", "cauldron_rendered_text"]},
+}
+
+
+def compose_sft(task_names: list[str]) -> dict:
+    """Expand task names into an SFT config: `mix` = base-mixture (corpus, weight) for caption/ocr/codegen
+    modes (equal weight per corpus), `vqa` = VQA source names for vqa mode, `design_codegen` = any codegen
+    task selected. Validates each dataset resolves (REGISTRY for mix, VQA_SPECS/CAULDRON_VQA for vqa)."""
+    mix: list[tuple[str, float]] = []
+    vqa: list[str] = []
+    codegen = False
+    for t in task_names:
+        if t not in TASKS:
+            raise ValueError(f"unknown task {t!r}; choices: {list(TASKS)}")
+        spec = TASKS[t]
+        if spec["mode"] == "vqa":
+            for d in spec["datasets"]:
+                _resolve_vqa(d)  # raises on unknown VQA set
+                vqa.append(d)
+        else:  # caption / ocr / codegen -> base-mixture corpora
+            for d in spec["datasets"]:
+                if d not in REGISTRY:
+                    raise ValueError(f"task {t!r} dataset {d!r} not in REGISTRY")
+                mix.append((d, 1.0))
+            codegen = codegen or spec["mode"] == "codegen"
+    return {"mix": mix or None, "vqa": vqa, "design_codegen": codegen}
+
+
 def parse_mixture(spec: str) -> list[tuple[str, float]]:
     """Parse a mixture string 'websight=0.6,webcode2m=0.4' into [(name, weight), ...]."""
     pairs = []

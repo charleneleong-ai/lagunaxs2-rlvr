@@ -25,8 +25,8 @@ from torch.utils.data import DataLoader, Dataset
 
 from laguna_rlvr.adapter_plan import plan_from_config, render_plan, validate_gpu_budget
 from laguna_rlvr.seed import DEFAULT_SEED, seed_everything
-from laguna_rlvr.visual.corpora import (CHOICES, DEFAULT_VQA, QASFTDataset, load_text_image, load_vqa,
-                                        parse_mixture, read_question)
+from laguna_rlvr.visual.corpora import (CHOICES, DEFAULT_VQA, QASFTDataset, compose_sft, load_text_image,
+                                        load_vqa, parse_mixture, read_question)
 from laguna_rlvr.visual.multiturn_qa import (_RECALL_Q, dataset_qa_accuracy, evaluate_multiturn_qa,
                                              image_fetcher, mixture_episodes)
 from laguna_rlvr.visual.data import SyntheticOCR
@@ -143,7 +143,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           qa_eval: bool = True, description: str = "", init_projector: str = "",
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
           lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0,
-          qa_eval_n: int = 40, lora_rank: int = 16, design_codegen: bool = False) -> Path:
+          qa_eval_n: int = 40, lora_rank: int = 16, design_codegen: bool = False, tasks: str = "") -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -168,7 +168,12 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     # prior for `--dataset mix` ONLY — `align` (and any other named dataset) carries its own built-in
     # mix (_ALIGN_MIX), so the config's mix weights must NOT bleed into it (else --dataset align silently
     # runs the code-heavy default mix and erodes readout — caught 2026-06-02).
-    if mixture:
+    # --tasks (task->dataset lookup) composes mix + vqa + design_codegen from declared capabilities; it
+    # wins over --mixture/--vqa/--design-codegen when set.
+    composed = compose_sft([t.strip() for t in tasks.split(",") if t.strip()]) if tasks else None
+    if composed and composed["mix"]:
+        mix_specs = composed["mix"]
+    elif mixture:
         mix_specs = parse_mixture(mixture)
     elif dataset == "mix":
         mix_specs = [(k, float(v)) for k, v in cfg.get("mixture", {}).get("weights", {}).items()] or None
@@ -176,7 +181,10 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         mix_specs = None
     full = load_text_image(dataset, n_train, mixture=mix_specs)
     if objective == "qa":  # QA-SFT: (image, answer, corpus, question) from needle rows + VQA reading sets
-        vqa_names = DEFAULT_VQA if vqa == "default" else [s for s in vqa.split(",") if s]
+        if composed:
+            vqa_names, design_codegen = composed["vqa"], design_codegen or composed["design_codegen"]
+        else:
+            vqa_names = DEFAULT_VQA if vqa == "default" else [s for s in vqa.split(",") if s]
         full = QASFTDataset(full, vqa_sources=load_vqa(vqa_names, n_train) if vqa_names else None,
                             design_codegen=design_codegen)
     n_val = min(max(1, len(full) // 10), 256)  # 90/10 split, capped so frequent val stays cheap
@@ -446,10 +454,11 @@ def main(
     qa_eval_n: int = typer.Option(40, help="# val items scored for qa_acc each eval (bigger = less noisy, slower)"),
     lora_rank: int = typer.Option(16, help="attention-LoRA rank (alpha=2r); raise to test if capacity caps reading"),
     design_codegen: bool = typer.Option(False, help="train html/python corpora as screenshot->code generation (full code answer) vs title-reading"),
+    tasks: str = typer.Option("", help="task->dataset lookup: comma list of capabilities (e.g. 'vqa,design,ocr'); composes mix+vqa+design-codegen, overrides --mixture/--vqa"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n, lora_rank, design_codegen)
+          objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n, lora_rank, design_codegen, tasks)
 
 
 if __name__ == "__main__":
