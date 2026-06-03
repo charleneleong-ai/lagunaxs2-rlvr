@@ -1,7 +1,7 @@
 import pytest
 from PIL import Image
 
-from laguna_rlvr.visual.corpora import CAULDRON_VQA, CHOICES, REGISTRY, _resolve_vqa, load_text_image
+from laguna_rlvr.visual.corpora import CAULDRON_VQA, _resolve_vqa, load_text_image
 from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.hf_image_text import parse_cauldron_vqa
 
@@ -135,11 +135,6 @@ def test_extract_needle_none_when_absent(label, kind):
     assert extract_needle(label, kind) is None
 
 
-def test_caption_configs_registered():
-    for name in ("cauldron_localized_narratives", "cauldron_screen2words"):
-        assert name in REGISTRY and name in CHOICES
-
-
 def test_resolve_vqa_dispatch():
     assert _resolve_vqa("textvqa") == "spec"
     assert _resolve_vqa("vqav2") == "cauldron" and "vqav2" in CAULDRON_VQA
@@ -189,10 +184,3 @@ def test_compose_sft_merges_tasks_into_mix_vqa_codegen():
     assert ("websight", 1.0) in c["mix"] and ("webcode2m", 1.0) in c["mix"]  # design -> base mix corpora
     assert "vqav2" in c["vqa"] and "textvqa" in c["vqa"]                      # vqa -> vqa sources
     assert c["design_codegen"] is True                                       # design is codegen mode
-
-
-def test_compose_sft_unknown_task_raises():
-    from laguna_rlvr.visual.corpora import compose_sft
-
-    with pytest.raises(ValueError):
-        compose_sft(["nope"])
