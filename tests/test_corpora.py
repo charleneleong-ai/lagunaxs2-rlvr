@@ -1,7 +1,7 @@
 import pytest
 from PIL import Image
 
-from laguna_rlvr.visual.corpora import load_text_image
+from laguna_rlvr.visual.corpora import CAULDRON_VQA, CHOICES, REGISTRY, _resolve_vqa, load_text_image
 from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.hf_image_text import parse_cauldron_vqa
 
@@ -133,6 +133,18 @@ def test_extract_needle_pulls_title(label, kind, expected):
 def test_extract_needle_none_when_absent(label, kind):
     from laguna_rlvr.visual.corpora import extract_needle
     assert extract_needle(label, kind) is None
+
+
+def test_caption_configs_registered():
+    for name in ("cauldron_localized_narratives", "cauldron_screen2words"):
+        assert name in REGISTRY and name in CHOICES
+
+
+def test_resolve_vqa_dispatch():
+    assert _resolve_vqa("textvqa") == "spec"
+    assert _resolve_vqa("vqav2") == "cauldron" and "vqav2" in CAULDRON_VQA
+    with pytest.raises(ValueError):
+        _resolve_vqa("nope")
 
 
 def test_qasft_dataset_extracts_needle_triples():

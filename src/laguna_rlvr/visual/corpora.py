@@ -139,6 +139,8 @@ REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "cauldron_rendered_text": _cauldron("rendered_text"),  # rendered text -> transcription
     "cauldron_textcaps": _cauldron("textcaps"),            # reading-aware image captions
     "cauldron_iam": _cauldron("iam"),                      # handwriting transcription
+    "cauldron_localized_narratives": _cauldron("localized_narratives"),  # general dense captions (grounding)
+    "cauldron_screen2words": _cauldron("screen2words"),                  # UI screenshot -> summary
 }
 CHOICES = [*REGISTRY, "mix", "align"]
 
@@ -241,11 +243,29 @@ VQA_SPECS: dict[str, dict] = {
 DEFAULT_VQA = list(VQA_SPECS)  # all registered VQA reading sets — on by default for QA-SFT
 
 
+CAULDRON_VQA = ["vqav2", "okvqa", "visual7w"]  # the_cauldron general image-dependent VQA (Stage-2)
+
+
+def _resolve_vqa(name: str) -> str:
+    """Which loader backs a VQA name: 'spec' (lmms-lab via VQA_SPECS) or 'cauldron' (the_cauldron)."""
+    if name in VQA_SPECS:
+        return "spec"
+    if name in CAULDRON_VQA:
+        return "cauldron"
+    raise ValueError(f"unknown VQA set {name!r}; choices: {list(VQA_SPECS) + CAULDRON_VQA}")
+
+
 def load_vqa(names: list[str], n: int) -> list[tuple]:
-    from laguna_rlvr.visual.hf_image_text import VQADataset  # local: lazy heavy-dep, matches the builders
-    # Each VQA set is an independent I/O-bound materialization; load them concurrently to overlap startup.
+    from laguna_rlvr.visual.hf_image_text import CauldronVQADataset, VQADataset
+
+    def build(name):
+        src = _resolve_vqa(name)
+        ds = VQADataset(n=n, **VQA_SPECS[name]) if src == "spec" else CauldronVQADataset(name, n=n)
+        return ds, name
+
+    # Each VQA set is an independent I/O-bound materialization; load concurrently to overlap startup.
     with ThreadPoolExecutor(max_workers=max(1, len(names))) as ex:
-        return list(ex.map(lambda name: (VQADataset(n=n, **VQA_SPECS[name]), name), names))
+        return list(ex.map(build, names))
 
 
 def parse_mixture(spec: str) -> list[tuple[str, float]]:
