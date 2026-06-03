@@ -91,12 +91,14 @@ class VisualAdapter(nn.Module):
         unfreeze: str = "",
         use_anchor: bool = True,
         norm_penalty: float = 0.0,
+        lora_rank: int = 16,
     ):
         super().__init__()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = dtype or (torch.bfloat16 if self.device.startswith("cuda") else torch.float32)
         self.encoder = encoder
         self.unfreeze = unfreeze
+        self.lora_rank = lora_rank
         self.use_anchor = use_anchor  # soft-scalar norm match; off lets the projector keep per-token scale
         self.norm_penalty = norm_penalty  # soft cap on projected-token scale (the --no-anchor ballooning)
         self.llm, self.tok = load_causal_lm(base_llm, self.device, dtype)
@@ -119,13 +121,15 @@ class VisualAdapter(nn.Module):
         self._emb_norm_median = self.llm.get_input_embeddings().weight.float().norm(dim=-1).median()
 
     def _apply_lora(self) -> None:
-        """Wrap the frozen LLM with attention-only LoRA (q/k/v/o). The MoE expert MLPs stay frozen —
-        adapting attention is the minimal lever for the decoder to attend to the projected vision
-        tokens, and keeps trainable params (+AdamW state) tiny enough to co-reside with the 33B base."""
+        """Wrap the frozen LLM with attention-only LoRA (q/k/v/o), rank `self.lora_rank` (alpha = 2·r).
+        The MoE expert MLPs stay frozen — adapting attention is the minimal lever for the decoder to
+        attend to the projected vision tokens, and keeps trainable params (+AdamW state) tiny enough to
+        co-reside with the 33B base. Raise the rank (--lora-rank) to test whether attention capacity,
+        not data, caps reading."""
         from peft import LoraConfig, get_peft_model
 
-        cfg = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.0, bias="none", task_type="CAUSAL_LM",
-                         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])
+        cfg = LoraConfig(r=self.lora_rank, lora_alpha=2 * self.lora_rank, lora_dropout=0.0, bias="none",
+                         task_type="CAUSAL_LM", target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])
         self.llm = get_peft_model(self.llm, cfg)
 
     def trainable_parameters(self):

@@ -57,3 +57,11 @@ class TestImageToken:
                           device=adapter.llm.device, dtype=adapter.llm.dtype)
         with pytest.raises(ValueError):
             adapter._embed_with_vision("no marker here", vis)
+
+
+def test_lora_rank_threads_to_peft_config():
+    """--lora-rank reaches the PEFT config; alpha tracks 2·r (the capacity lever for reading)."""
+    a = VisualAdapter(encoder=load_encoder("glm_ocr", pool=4), base_llm=BASE,
+                      projector_kind="linear", unfreeze="lora", lora_rank=8)
+    pc = a.llm.peft_config["default"]
+    assert pc.r == 8 and pc.lora_alpha == 16
