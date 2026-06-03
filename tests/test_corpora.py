@@ -1,7 +1,27 @@
 import pytest
+from PIL import Image
 
 from laguna_rlvr.visual.corpora import load_text_image
 from laguna_rlvr.visual.data import SyntheticOCR
+from laguna_rlvr.visual.hf_image_text import parse_cauldron_vqa
+
+
+def _row(user, assistant, with_image=True):
+    img = Image.new("RGB", (4, 4)) if with_image else None
+    return {"images": [img] if with_image else [], "texts": [{"user": user, "assistant": assistant}]}
+
+
+def test_parse_cauldron_vqa_extracts_first_turn():
+    r = parse_cauldron_vqa(_row("<image>\nWhat color is the car?", "red"))
+    assert r["question"] == "What color is the car?" and r["answer"] == "red"
+    assert r["image"].size == (4, 4)
+
+
+def test_parse_cauldron_vqa_skips_incomplete():
+    assert parse_cauldron_vqa(_row("", "red")) is None          # no question
+    assert parse_cauldron_vqa(_row("Q?", "")) is None           # no answer
+    assert parse_cauldron_vqa(_row("Q?", "a", with_image=False)) is None  # no image
+    assert parse_cauldron_vqa({"images": [], "texts": []}) is None
 
 
 def test_load_text_image_dispatches_synthetic():  # offline — no network/model

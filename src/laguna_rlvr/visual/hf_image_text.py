@@ -105,6 +105,20 @@ def _cauldron_rows(*, shard_idx, num_shards, per_shard, offset, config, split, m
                 yield {"image": images[0].convert("RGB"), "text": texts[0]["assistant"][:max_text_chars]}
 
 
+def parse_cauldron_vqa(row: dict) -> dict | None:
+    """First (user, assistant) turn of a the_cauldron row -> {image, question, answer}, or None if any
+    field is missing. Strips the '<image>' placeholder the cauldron prepends to the user question."""
+    images, texts = row.get("images"), row.get("texts")
+    if not images or not texts:
+        return None
+    turn = texts[0]
+    q = (turn.get("user") or "").replace("<image>", "").strip()
+    a = (turn.get("assistant") or "").strip()
+    if images[0] is None or not q or not a:
+        return None
+    return {"image": images[0].convert("RGB"), "question": q, "answer": a}
+
+
 _VQA_FEATURES = Features({"image": HFImage(), "question": Value("string"), "answer": Value("string")})
 
 
