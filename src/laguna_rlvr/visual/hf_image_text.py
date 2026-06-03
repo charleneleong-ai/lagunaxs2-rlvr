@@ -119,6 +119,17 @@ def parse_cauldron_vqa(row: dict) -> dict | None:
     return {"image": images[0].convert("RGB"), "question": q, "answer": a}
 
 
+def _cauldron_vqa_rows(*, shard_idx, num_shards, per_shard, offset, config, split):
+    """Yield {image, question, answer} rows from a the_cauldron VQA config — for from_generator."""
+    for i in shard_idx:
+        base = load_dataset("HuggingFaceM4/the_cauldron", config, split=split, streaming=True)
+        rows = islice(base.shard(num_shards, i), per_shard) if num_shards > 1 else \
+            islice(base, offset, offset + per_shard)
+        for row in track(rows, total=per_shard, description=f"cauldron-vqa/{config} shard {i}"):
+            if (r := parse_cauldron_vqa(row)) is not None:
+                yield r
+
+
 _VQA_FEATURES = Features({"image": HFImage(), "question": Value("string"), "answer": Value("string")})
 
 
@@ -206,6 +217,30 @@ class CauldronDataset(Dataset):
     def __getitem__(self, i: int):
         row = self._ds[i]
         return row["image"], row["text"]
+
+
+class CauldronVQADataset(Dataset):
+    """(image, question, answer) triples from a the_cauldron VQA config (vqav2/okvqa/visual7w) — the
+    first user/assistant turn. General, image-dependent VQA for Stage-2 instruction (reference recipe).
+    Same streaming + disk cache as VQADataset."""
+
+    def __init__(self, config: str, *, split: str = "train", n: int = 2000, offset: int = 0):
+        key = "cauldronvqa__" + "__".join(str(p) for p in (config, split, n, offset))
+        self._ds = _cached_or_stream(key, lambda: self._stream(config, split, n, offset))
+
+    @staticmethod
+    def _stream(config, split, n, offset) -> HFDataset:
+        return _materialize(_cauldron_vqa_rows, _VQA_FEATURES, n=n, offset=offset,
+                            n_files=lambda: _n_shards("HuggingFaceM4/the_cauldron", config, split),
+                            error=f"no usable rows from the_cauldron/{config} (vqa)",
+                            config=config, split=split)
+
+    def __len__(self) -> int:
+        return len(self._ds)
+
+    def __getitem__(self, i: int):
+        row = self._ds[i]
+        return row["image"], row["question"], row["answer"]
 
 
 class VQADataset(Dataset):
