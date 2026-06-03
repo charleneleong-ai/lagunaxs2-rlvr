@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 
 from torch.utils.data import Dataset
 
@@ -263,9 +262,10 @@ def load_vqa(names: list[str], n: int) -> list[tuple]:
         ds = VQADataset(n=n, **VQA_SPECS[name]) if src == "spec" else CauldronVQADataset(name, n=n)
         return ds, name
 
-    # Each VQA set is an independent I/O-bound materialization; load concurrently to overlap startup.
-    with ThreadPoolExecutor(max_workers=max(1, len(names))) as ex:
-        return list(ex.map(build, names))
+    # Sequential: each set's own from_generator preload is already process-parallel (LAGUNA_DATASET_PROCS).
+    # Do NOT wrap that in a thread pool — launching a multiprocessing pool from many threads breaks HF's
+    # from_generator (DatasetGenerationError under parallel preload, 2026-06-03).
+    return [build(name) for name in names]
 
 
 def parse_mixture(spec: str) -> list[tuple[str, float]]:
