@@ -242,7 +242,9 @@ VQA_SPECS: dict[str, dict] = {
 DEFAULT_VQA = list(VQA_SPECS)  # all registered VQA reading sets — on by default for QA-SFT
 
 
-CAULDRON_VQA = ["vqav2", "okvqa", "visual7w"]  # the_cauldron general image-dependent VQA (Stage-2)
+# the_cauldron general image-dependent VQA (Stage-2). okvqa excluded: its images are dangling
+# /fsx/... path refs (not bundled), so HF's lazy decode hits FileNotFoundError (2026-06-03).
+CAULDRON_VQA = ["vqav2", "visual7w"]
 
 
 def _resolve_vqa(name: str) -> str:
