@@ -1,6 +1,9 @@
+import pytest
+
 from laguna_rlvr.visual.multiturn_qa import (
     Episode,
     QARef,
+    _match,
     load_manifest,
     read_question,
     run_qa,
@@ -41,3 +44,28 @@ def test_synthetic_episodes_have_distinct_needles():
     eps = synthetic_episodes(n=3, seed=0)
     needles = [e.a.needle for e in eps] + [e.b.needle for e in eps]
     assert len(eps) == 3 and len(set(needles)) == len(needles)
+
+
+class TestMatch:
+    """_match: single-token answers need word-boundary delimitation; multi-word keep substring."""
+
+    @pytest.mark.parametrize("needle,reply", [
+        ("23", "the value is 23 units"),                  # number as a standalone token
+        ("no", "the answer is no"),                        # yes/no
+        ("0.57", "the difference is 0.57 here"),           # decimal token
+        ("alpha", "here is alpha ok"),                     # single word, delimited
+        ("Section 4.2 Results 6890", "Section 4.2 Results"),                 # multi-word partial: reply ⊂ needle
+    ])
+    def test_accepts(self, needle, reply):
+        assert _match(needle, reply)
+
+    @pytest.mark.parametrize("needle,reply", [
+        ("23", "20000000000000"),         # digit-spam must NOT credit a short number (the mirage)
+        ("2", "2000000"),
+        ("14", "10 15 20 25 30 35"),      # '14' is not a token here
+        ("100", "2000100000"),            # glued inside a longer run
+        ("no", "unanswerable unanswerable"),
+        ("samsung", "nokia lumia"),       # disjoint hallucination
+    ])
+    def test_rejects(self, needle, reply):
+        assert not _match(needle, reply)
