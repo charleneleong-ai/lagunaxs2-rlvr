@@ -53,15 +53,19 @@ def _norm(s: str) -> str:
 
 
 def _match(needle: str, reply: str) -> bool:
-    """Loosened read match: BIDIRECTIONAL substring. The reply contains the needle ('University of
-    California, Berkeley' for 'university of california'), OR the reply is a substantial substring of
-    the needle ('Section 4.2 Results' for 'Section 4.2 Results 6890' = a partial read). Contiguity is
-    the point: token-F1 over-credited shared function words ('University of Minnesota' scored a HIT for
-    'University of California' via 'university of'); requiring a contiguous match fixes that while still
-    crediting partial/verbose reads and rejecting disjoint hallucinations ('nokia' vs 'samsung')."""
+    """Read match. A single-token answer (VQA number / word / yes-no) must appear word-boundary
+    delimited in the reply, never glued inside a longer run. A multi-word needle keeps BIDIRECTIONAL
+    substring: the reply contains it ('University of California, Berkeley' ⊇ 'university of california'),
+    OR the reply is a substantial substring of it ('Section 4.2 Results' ⊂ 'Section 4.2 Results 6890' =
+    a partial read). Contiguity rejects shared-function-word F1 inflation ('University of Minnesota' vs
+    'University of California') and disjoint hallucinations ('nokia' vs 'samsung')."""
     n, r = _norm(needle), _norm(reply)
     if not n or not r:
         return False
+    # Single-token answer: word-boundary delimited, never glued inside a longer run — else degenerate
+    # digit-spam ('2000…') falsely credits gold '2'/'23'/'100' (the chartqa 0.50 mirage, 2026-06-03).
+    if " " not in n:
+        return re.search(rf"(?<!\w){re.escape(n)}(?!\w)", r) is not None
     return n in r or (len(r) >= 4 and r in n)
 
 
