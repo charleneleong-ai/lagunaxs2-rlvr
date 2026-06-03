@@ -180,3 +180,19 @@ def test_qasft_design_codegen_uses_full_code_and_prompt():
     # full code is the answer, asked via the kind's generation prompt (not the title-needle)
     assert ds[0] == ("imgA", "<html><h1>Hi</h1></html>", "design2code", TASK_PROMPT["html"])
     assert ds[1] == ("imgB", 'ax.set_title("Sales")', "chartmimic", TASK_PROMPT["python"])
+
+
+def test_compose_sft_merges_tasks_into_mix_vqa_codegen():
+    from laguna_rlvr.visual.corpora import compose_sft
+
+    c = compose_sft(["vqa", "design"])
+    assert ("websight", 1.0) in c["mix"] and ("webcode2m", 1.0) in c["mix"]  # design -> base mix corpora
+    assert "vqav2" in c["vqa"] and "textvqa" in c["vqa"]                      # vqa -> vqa sources
+    assert c["design_codegen"] is True                                       # design is codegen mode
+
+
+def test_compose_sft_unknown_task_raises():
+    from laguna_rlvr.visual.corpora import compose_sft
+
+    with pytest.raises(ValueError):
+        compose_sft(["nope"])
