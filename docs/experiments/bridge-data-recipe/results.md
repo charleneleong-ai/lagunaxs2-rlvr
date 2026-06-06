@@ -37,7 +37,14 @@ scores vqav2 0.60 / visual7w 0.55 on its suite.
 Eval subsets are tiny (`qa_eval_n=160` split ~12 ways → ~13 items/task), so single-item flips read as 0.06–0.08
 and peak spikes are noise, not stable capability.
 
-| Task type | Task | NaFlex | AnyRes | Qwen3-VL |
+NaFlex and AnyRes share the **same SigLIP2 so400m backbone** — NaFlex
+([`siglip2-so400m-patch16-naflex`](https://huggingface.co/google/siglip2-so400m-patch16-naflex)) = native
+variable-resolution (no tiling), AnyRes
+([`siglip2-so400m-patch16-384`](https://huggingface.co/google/siglip2-so400m-patch16-384)) = 384 fixed-square +
+AnyRes tiling. Qwen3-VL ([`Qwen3-VL-4B-Instruct`](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct)) = a separate
+tower. So NaFlex-vs-AnyRes is a same-encoder resolution A/B.
+
+| Task type | Task | SigLIP2-NaFlex | SigLIP2-AnyRes | Qwen3-VL-4B |
 |---|---|---|---|---|
 | **Natural-image VQA** | vqav2 | 0.48 / 0.52 | 0.40 / 0.56 | 0.48 / 0.60 |
 | (sparse text) | visual7w | 0.57 / 0.71 | **0.64** / 0.64 | **0.64** / 0.64 |
