@@ -24,27 +24,36 @@ Stage-1 caption runs (`align`, `recon`, 200k) report `qa_best = -1` by design (n
 stage). The lift appears the moment Stage-2 instruction runs on the caption-aligned checkpoint — confirming the
 bridge spec's behavioural success criterion.
 
-## Per-task accuracy by backbone (best Stage-2 run each)
+## Per-task accuracy by backbone (all-tasks Stage-2 run each)
 
-`—` = not in that run's eval set (the NaFlex `stage2instruct` eval set is the 6-task reading suite; figureqa/plotqa/dvqa/chart2text/infographic/visualmrc are AnyRes-plan-only). NaFlex column is the clean 2026-06-05 rerun.
+All three columns are the **all-tasks** Stage-2 runs (`stage2naflex_alltasks` / `stage2anyres_alltasks` /
+`stage2qwen3vl_alltasks`) on the same 12-task VQA eval — so the comparison is apples-to-apples across the full
+task set, no dashes. Each cell is **final / peak** = final-step accuracy / best single eval over the run, so a
+dead `0.00 / 0.00` means the task never scored *even at its best eval*, while `0.00 / 0.33` is a flicker that
+didn't hold. The clean confirmed-recipe NaFlex rerun (`stage2instruct`, qa_best **0.225**, in the verdict table
+above) used a narrower 6-task reading suite; it agrees with the column here on the wall (docvqa/ocrvqa = 0) and
+scores vqav2 0.60 / visual7w 0.55 on its suite.
+
+Eval subsets are tiny (`qa_eval_n=160` split ~12 ways → ~13 items/task), so single-item flips read as 0.06–0.08
+and peak spikes are noise, not stable capability.
 
 | Task type | Task | NaFlex | AnyRes | Qwen3-VL |
 |---|---|---|---|---|
-| **Natural-image VQA** | vqav2 | **0.60** | 0.40 | 0.48 |
-| (sparse text) | visual7w | 0.55 | **0.64** | **0.64** |
-| **Chart/figure VQA** | figureqa | — | **0.95** | **0.95** |
-| (synthetic, sparse) | plotqa | — | **0.56** | 0.38 |
-| | dvqa | — | 0.06 | 0.13 |
-| **Scene-text VQA** | textvqa | 0.06 | **0.23** | **0.23** |
-| **Real chart** (dense) | chartqa | 0.00 | 0.00 | 0.00 |
-| | chart2text | — | 0.00 | 0.00 |
-| **OCR-dense document** | docvqa | 0.00 | 0.00 | 0.00 |
-| | ocrvqa | 0.00 | 0.00 | 0.00 |
-| | infographic_vqa | — | 0.00 | 0.00 |
-| | visualmrc | — | 0.00 | 0.00 |
-| **Design code-gen** | websight | 0.00 | 0.00 | 0.00 |
-| | webcode2m | 0.00 | 0.00 | 0.00 |
-| **Synthetic OCR** | synthetic | 0.00 | 0.00 | 0.00 |
+| **Natural-image VQA** | vqav2 | 0.48 / 0.52 | 0.40 / 0.56 | 0.48 / 0.60 |
+| (sparse text) | visual7w | 0.57 / 0.71 | **0.64** / 0.64 | **0.64** / 0.64 |
+| **Chart/figure VQA** | figureqa | **0.95** / 0.95 | **0.95** / 0.95 | **0.95** / 1.00 |
+| (synthetic, sparse) | plotqa | 0.50 / 0.62 | **0.56** / 0.56 | 0.38 / 0.38 |
+| | dvqa | 0.06 / 0.19 | 0.06 / 0.19 | 0.12 / 0.12 |
+| **Scene-text VQA** | textvqa | 0.23 / 0.23 | 0.23 / 0.31 | 0.23 / 0.31 |
+| **Real chart** (dense) | chartqa | **0.33 / 0.33** | 0.00 / 0.00 | 0.00 / 0.33 |
+| | chart2text | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 |
+| **OCR-dense document** | docvqa | 0.00 / 0.00 | 0.00 / 0.25 | 0.00 / 0.00 |
+| | ocrvqa | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 |
+| | infographic_vqa | **0.33 / 0.33** | 0.00 / 0.33 | 0.00 / 0.33 |
+| | visualmrc | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 |
+| **Design code-gen** | websight | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 |
+| | webcode2m | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 |
+| **Synthetic OCR** | synthetic | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 |
 | **Isolation control** | infographic_vqa *(isolated)* | — | **0.32** | — |
 
 ## Reading
@@ -52,13 +61,19 @@ bridge spec's behavioural success criterion.
 1. **Grounding is real for sparse-text tasks.** A clean capability gradient by text-density: figureqa 0.95,
    plotqa 0.56, visual7w/vqav2 0.4–0.64 ground well; the intermediate (dvqa) is weak (0.06–0.13); everything
    text-dense is a flat 0.00. The projector can locate a region and read *a* glyph, not *many*.
-2. **The OCR-dense wall is not resolution.** NaFlex (native variable res), AnyRes (tiled 384), and Qwen3-VL
-   (dynamic high-res) are identical 0.00 on docvqa/chartqa/ocrvqa/design. Tower swaps don't move it.
-3. **Isolation helps the sparse-ish tasks, not dense OCR.** `infographic_vqa` goes **0.00 diluted → 0.32
+2. **The truly-dense wall is not resolution.** docvqa / ocrvqa / visualmrc / chart2text are **0.00 final AND
+   peak on all three backbones** — NaFlex (native variable res), AnyRes (tiled 384), Qwen3-VL (dynamic high-res)
+   never move them. Tower swaps don't help, and (separately) the NaFlex LoRA-rank sweep below doesn't either.
+   The only motion on the wall is *peak-flicker* — AnyRes docvqa touches 0.25, Qwen chartqa/infographic touch
+   0.33 — but none **hold** (final back to 0). Those spikes are ~1–4 items on a ~13-item subset, i.e. noise.
+3. **NaFlex actually wins the semi-dense tasks.** chartqa and infographic_vqa hold **0.33 final** on NaFlex
+   where AnyRes/Qwen only flicker there and settle at 0. So NaFlex isn't uniformly behind — the dense gradient is
+   chartqa/infographic (semi-dense, partly readable) > docvqa/ocrvqa/visualmrc (the hard floor, dead 0 for all).
+4. **Isolation helps the sparse-ish tasks, not dense OCR.** `infographic_vqa` goes **0.00 diluted → 0.32
    isolated** — that capability exists but the 16-task mix crowds it out. But the capacity sweep below shows
    docvqa stays at the noise floor *even isolated and at 4× LoRA rank* — so the wall on truly dense text is a
    reading limit, not a capacity-allocation one.
-4. **Backbone barely matters at the wall.** AnyRes-siglip and Qwen3-VL tie at 0.3125 with near-identical
+5. **Backbone barely matters at the wall.** AnyRes-siglip and Qwen3-VL tie at 0.3125 with near-identical
    per-task profiles.
 
 ## Next move
