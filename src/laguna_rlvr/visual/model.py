@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import torch
+from peft import LoraConfig, get_peft_model
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -17,6 +18,40 @@ _PROMPT = f"{IMAGE_TOKEN}\nTranscribe the text in the image:"
 # ample for projector alignment; the full screenshot->code objective belongs to a later stage.
 _MAX_LABEL_TOKENS = 384   # label budget (was 512) — trimmed to keep the loss sequence under the OOM line
 _MAX_SEQ_TOKENS = 896     # skip (vision + label) sequences above this — their fp32 logits OOM the 80GB loss
+
+
+def _lora_targets(include_ffn: bool) -> list[str]:
+    """PEFT target-module suffixes. Attention always; `include_ffn` adds the LagunaMLP linears
+    (gate/up/down) — these resolve to the *shared expert* (always-on) and any dense-layer MLP. The 256
+    routed experts are batched `nn.Parameter` tensors, not modules, so PEFT skips them automatically."""
+    targets = ["q_proj", "k_proj", "v_proj", "o_proj"]
+    if include_ffn:
+        targets += ["gate_proj", "up_proj", "down_proj"]
+    return targets
+
+
+def _unfreeze_top_k(llm: nn.Module, n_layers: int) -> int:
+    """Unfreeze the top `n_layers` decoder blocks' attention + shared expert + router + norms, leaving the
+    routed experts (`.experts.` 3D Parameters) frozen — they don't fit in optimizer memory on one 80GB GPU.
+    Returns the count of newly-trainable tensors."""
+    count = 0
+    for layer in llm.model.layers[-n_layers:]:
+        for name, p in layer.named_parameters():
+            if ".experts." in name:  # routed-expert weights (LagunaExperts) — the memory bomb
+                continue
+            p.requires_grad_(True)
+            count += 1
+    return count
+
+
+def _trainable_fast_slow(named_parameters):
+    """Partition requires_grad params into (fast = LoRA, slow = unfrozen base) by name, so the optimizer
+    can run the pretrained decoder at a lower LR than the projector/LoRA."""
+    fast, slow = [], []
+    for name, p in named_parameters:
+        if p.requires_grad:
+            (fast if "lora_" in name else slow).append((name, p))
+    return fast, slow
 
 
 @dataclass
@@ -92,6 +127,7 @@ class VisualAdapter(nn.Module):
         use_anchor: bool = True,
         norm_penalty: float = 0.0,
         lora_rank: int = 16,
+        unfreeze_layers: int = 4,
     ):
         super().__init__()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -99,6 +135,7 @@ class VisualAdapter(nn.Module):
         self.encoder = encoder
         self.unfreeze = unfreeze
         self.lora_rank = lora_rank
+        self.unfreeze_layers = unfreeze_layers
         self.use_anchor = use_anchor  # soft-scalar norm match; off lets the projector keep per-token scale
         self.norm_penalty = norm_penalty  # soft cap on projected-token scale (the --no-anchor ballooning)
         self.llm, self.tok = load_causal_lm(base_llm, self.device, dtype)
@@ -106,8 +143,11 @@ class VisualAdapter(nn.Module):
         self.llm.eval()
         for p in self.llm.parameters():
             p.requires_grad_(False)
-        if unfreeze == "lora":  # let the frozen decoder learn to *read* the projector tokens
-            self._apply_lora()
+        if unfreeze in ("lora", "lora-moe"):  # let the frozen decoder learn to *read* the projector tokens
+            self._apply_lora(include_ffn=unfreeze == "lora-moe")  # lora-moe also adapts the shared-expert FFN
+        elif unfreeze == "top-k":  # full plasticity (incl. router) on the output layers; routed experts stay frozen
+            n = _unfreeze_top_k(self.llm, unfreeze_layers)
+            print(f"unfroze top-{unfreeze_layers} decoder layers ({n} tensors; routed experts kept frozen)", flush=True)
         # use_reentrant=False so grads still flow to the (trainable) projector even though
         # every LLM input embed is detached — reentrant checkpointing requires an input
         # that requires grad and would otherwise raise "none of the inputs require grad".
@@ -120,42 +160,52 @@ class VisualAdapter(nn.Module):
         # base-preservation gauge (embedding_norm_ratio) doesn't re-reduce the full vocab table per call.
         self._emb_norm_median = self.llm.get_input_embeddings().weight.float().norm(dim=-1).median()
 
-    def _apply_lora(self) -> None:
-        """Wrap the frozen LLM with attention-only LoRA (q/k/v/o), rank `self.lora_rank` (alpha = 2·r).
-        The MoE expert MLPs stay frozen — adapting attention is the minimal lever for the decoder to
-        attend to the projected vision tokens, and keeps trainable params (+AdamW state) tiny enough to
-        co-reside with the 33B base. Raise the rank (--lora-rank) to test whether attention capacity,
-        not data, caps reading."""
-        from peft import LoraConfig, get_peft_model
-
+    def _apply_lora(self, include_ffn: bool = False) -> None:
+        """Wrap the frozen LLM with LoRA, rank `self.lora_rank` (alpha = 2·r). Attention-only (q/k/v/o) by
+        default — the minimal lever for the decoder to *attend* to the projected vision tokens, tiny enough
+        to co-reside with the 33B base. `include_ffn` (--unfreeze lora-moe) also adapts the LagunaMLP linears
+        (the always-on shared expert + any dense layer), testing whether FFN plasticity — not attention
+        capacity, which the rank sweep ruled out — is what the OCR-dense wall needs. The 256 routed experts
+        are batched Parameters, not modules, so PEFT leaves them frozen either way."""
         cfg = LoraConfig(r=self.lora_rank, lora_alpha=2 * self.lora_rank, lora_dropout=0.0, bias="none",
-                         task_type="CAUSAL_LM", target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])
+                         task_type="CAUSAL_LM", target_modules=_lora_targets(include_ffn))
         self.llm = get_peft_model(self.llm, cfg)
 
     def trainable_parameters(self):
-        return [p for p in self.parameters() if p.requires_grad]  # projector (+ LoRA if unfrozen)
+        return [p for p in self.parameters() if p.requires_grad]  # projector (+ LoRA / unfrozen layers)
+
+    def optimizer_param_groups(self, lr: float, base_lr: float) -> list[dict]:
+        """Projector + LoRA at `lr`; unfrozen base layers (top-k mode) at the lower `base_lr` so the
+        pretrained decoder isn't clobbered. Single group when nothing base-side is unfrozen."""
+        fast, slow = _trainable_fast_slow(self.llm.named_parameters())
+        groups = [{"params": list(self.projector.parameters()) + [p for _, p in fast], "lr": lr}]
+        if slow:
+            groups.append({"params": [p for _, p in slow], "lr": base_lr})
+        return groups
 
     def adapter_state_dict(self) -> dict:
-        """The trainable deliverable: projector always, plus LoRA deltas when unfrozen. The LoRA
-        tensors are saved as raw named_parameters — peft's get/set_peft_model_state_dict route
-        through a transformers weight-conversion that is version-fragile (WeightConverter signature
-        drift). Only LoRA params require grad (base frozen), so the filter excludes the frozen
-        embedding for free — no save_embedding_layers bloat."""
+        """The trainable deliverable: projector always, plus any trainable LLM tensors — LoRA deltas
+        (lora/lora-moe) or unfrozen base weights (top-k). Saved as raw named_parameters: peft's
+        get/set_peft_model_state_dict route through a version-fragile transformers weight-conversion
+        (WeightConverter signature drift). The requires_grad filter excludes the frozen embedding for
+        free — no save_embedding_layers bloat."""
         sd = {"projector": self.projector.state_dict()}
-        if self.unfreeze == "lora":
-            sd["lora"] = {k: v.detach().cpu() for k, v in self.llm.named_parameters() if v.requires_grad}
+        trainable = {k: v.detach().cpu() for k, v in self.llm.named_parameters() if v.requires_grad}
+        if trainable:
+            sd["llm"] = trainable
         return sd
 
     def load_adapter_state_dict(self, sd: dict) -> None:
         sd = sd if "projector" in sd else {"projector": sd}  # accept a legacy raw projector state_dict too
         self.projector.load_state_dict(sd["projector"])
-        if "lora" in sd:
-            lora, own = sd["lora"], dict(self.llm.named_parameters())
-            if lora and next(iter(lora)) not in own:  # legacy peft-stripped keys -> re-insert ".default"
-                lora = {k.replace(".lora_A.weight", ".lora_A.default.weight")
-                         .replace(".lora_B.weight", ".lora_B.default.weight"): v for k, v in lora.items()}
-            res = self.llm.load_state_dict(lora, strict=False)
-            assert not res.unexpected_keys, f"unmatched LoRA keys: {res.unexpected_keys[:3]}"
+        blob = sd.get("llm", sd.get("lora"))  # "lora" = pre-top-k checkpoints
+        if blob:
+            own = dict(self.llm.named_parameters())
+            if next(iter(blob)) not in own:  # legacy peft-stripped keys -> re-insert ".default"
+                blob = {k.replace(".lora_A.weight", ".lora_A.default.weight")
+                         .replace(".lora_B.weight", ".lora_B.default.weight"): v for k, v in blob.items()}
+            res = self.llm.load_state_dict(blob, strict=False)
+            assert not res.unexpected_keys, f"unmatched trainable keys: {res.unexpected_keys[:3]}"
 
     def _add_image_token(self) -> None:
         """Add an <image> placeholder token, embedding-initialized as the mean of its subtoken

@@ -143,7 +143,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           qa_eval: bool = True, description: str = "", init_projector: str = "",
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
           lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0,
-          qa_eval_n: int = 40, lora_rank: int = 16, design_codegen: bool = False, tasks: str = "") -> Path:
+          qa_eval_n: int = 40, lora_rank: int = 16, design_codegen: bool = False, tasks: str = "",
+          unfreeze_layers: int = 4, unfreeze_lr_mult: float = 0.1) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -161,8 +162,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
 
     enc = load_encoder(encoder, pool=pool)
     adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze,
-                            use_anchor=use_anchor, norm_penalty=norm_penalty, lora_rank=lora_rank)
-    opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
+                            use_anchor=use_anchor, norm_penalty=norm_penalty, lora_rank=lora_rank,
+                            unfreeze_layers=unfreeze_layers)
+    opt = torch.optim.AdamW(adapter.optimizer_param_groups(lr, base_lr=lr * unfreeze_lr_mult))
 
     # Mixture weights: explicit --mixture always wins. Otherwise the config's [mixture].weights is the
     # prior for `--dataset mix` ONLY — `align` (and any other named dataset) carries its own built-in
@@ -446,7 +448,9 @@ def main(
     description: str = typer.Option("", help="this run's hypothesis/intent — leads the W&B run notes"),
     init_projector: str = typer.Option("", help="warm-start the projector from a prior best.pt (fresh optimizer)"),
     objective: str = typer.Option("recon", help="recon (transcribe) | qa (QA-SFT — forces vision use)"),
-    unfreeze: str = typer.Option("", help="'' = projector only | lora = + attention LoRA on the frozen LLM"),
+    unfreeze: str = typer.Option("", help="'' = projector only | lora = +attn LoRA | lora-moe = +shared-expert FFN LoRA | top-k = unfreeze top-N layers (attn+shared+router, routed experts stay frozen)"),
+    unfreeze_layers: int = typer.Option(4, help="top-k mode: # of top decoder layers to unfreeze"),
+    unfreeze_lr_mult: float = typer.Option(0.1, help="top-k mode: LR multiplier for unfrozen base layers vs projector/LoRA"),
     anchor: bool = typer.Option(True, "--anchor/--no-anchor", help="soft-scalar norm match on vision tokens"),
     lr: float = typer.Option(None, help="override the config learning rate"),
     vqa: str = typer.Option("default", help="VQA reading sets for QA-SFT: 'default'=all, comma-list, or '' = none"),
@@ -458,7 +462,8 @@ def main(
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
-          objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n, lora_rank, design_codegen, tasks)
+          objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n, lora_rank, design_codegen, tasks,
+          unfreeze_layers, unfreeze_lr_mult)
 
 
 if __name__ == "__main__":
