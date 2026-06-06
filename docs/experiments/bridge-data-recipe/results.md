@@ -54,9 +54,10 @@ bridge spec's behavioural success criterion.
    text-dense is a flat 0.00. The projector can locate a region and read *a* glyph, not *many*.
 2. **The OCR-dense wall is not resolution.** NaFlex (native variable res), AnyRes (tiled 384), and Qwen3-VL
    (dynamic high-res) are identical 0.00 on docvqa/chartqa/ocrvqa/design. Tower swaps don't move it.
-3. **It looks like capacity allocation.** `infographic_vqa` goes **0.00 diluted → 0.32 isolated** — the
-   capability exists but the 16-task mix crowds it out. Points the next lever at projector/LoRA capacity +
-   curriculum, not more data or pixels.
+3. **Isolation helps the sparse-ish tasks, not dense OCR.** `infographic_vqa` goes **0.00 diluted → 0.32
+   isolated** — that capability exists but the 16-task mix crowds it out. But the capacity sweep below shows
+   docvqa stays at the noise floor *even isolated and at 4× LoRA rank* — so the wall on truly dense text is a
+   reading limit, not a capacity-allocation one.
 4. **Backbone barely matters at the wall.** AnyRes-siglip and Qwen3-VL tie at 0.3125 with near-identical
    per-task profiles.
 
@@ -66,6 +67,25 @@ bridge spec's behavioural success criterion.
    pipeline reproduced the crashed partial exactly: qa_best **0.225** (vqav2 0.60, visual7w 0.55, OCR-dense flat
    0.00). Confirms the recipe lands NaFlex below the AnyRes/Qwen 0.31 tie, and the OCR-dense wall holds on all
    three towers — clearing the way for the capacity sweep.
-2. **Isolation + capacity sweep** to chase the OCR-dense wall: isolate one dense task (docvqa or chartqa) like
-   the infographic control, vary `--lora-rank` / vision-token count, and test whether it lifts off 0 the way
-   isolation lifted infographic (0→0.32) — separating "capacity-starved" from "genuinely can't read dense text".
+2. ~~**Isolation + capacity sweep**~~ — **DONE** (2026-06-05). Isolated the document family
+   (`docvqa,infographic_vqa,visualmrc`) on NaFlex, warm-started from the Stage-1 caption checkpoint, swept
+   `--lora-rank` ∈ {64,128,256} (W&B `*dociso_r{64,128,256}`, all finished). **Result below: capacity is not the
+   bottleneck — docvqa never leaves the noise floor.** Next lever moves to decoder unfreeze / targeted OCR data.
+
+## Isolation + capacity sweep — docvqa stays at the noise floor
+
+Peaks from W&B over 3000 steps (eval subsets are tiny — ~30 docvqa / ~17 infographic items — so values are
+item-counts, e.g. 0.033 ≈ 1/30):
+
+| arm | docvqa peak | infographic peak | visualmrc |
+|---|---|---|---|
+| `dociso_r64` | 0.033 (1/30) @900 | 0.176 (3/17) @1200 | 0.00 |
+| `dociso_r128` | 0.067 (2/30) @1200 | 0.118 (2/17) @600 | 0.00 |
+| `dociso_r256` | 0.033 (1/30) @300 | 0.176 (3/17) @600 | 0.00 |
+
+**Reading — "genuinely can't read dense text", not "capacity-starved".** docvqa does **not** rise with rank: it
+flickers 1–2 correct items across all three arms (non-monotonic — r128 highest, r256 falls back), i.e. the noise
+floor. infographic holds ~0.12–0.18 with no rank dependence and stays well under the AnyRes isolation control's
+0.32. visualmrc is dead flat at 0.00. Quadrupling the LoRA (64→256) buys nothing on the dense-OCR task — the
+adapter isn't capacity-limited, it can't transcribe dense glyphs at all. The next lever is **decoder unfreeze or
+targeted OCR-transcription data**, not bigger adapters or more vision tokens.
