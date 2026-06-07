@@ -39,13 +39,15 @@ def test_resampler_defaults_to_256_queries():
     assert p(torch.randn(1, 300, 16)).shape == (1, 256, 32)
 
 
-def test_load_compatible_transfers_machinery_and_resizes_query_bank():
+def test_load_compatible_grows_query_bank_keeping_trained_rows():
     src = Projector(16, 32, kind="resampler", n_queries=4)
     dst = Projector(16, 32, kind="resampler", n_queries=8)
-    skipped = dst.load_compatible(src.state_dict())   # warm-start across a query-bank resize
-    assert skipped == ["net.query"]                   # only the resized bank is left at init
-    assert torch.equal(dst.net.kv.weight, src.net.kv.weight)  # cross-attn machinery transferred
-    assert dst.net.query.shape == (8, 32)             # new bank keeps its larger size
+    partial = dst.load_compatible(src.state_dict())   # warm-start across a query-bank resize
+    assert partial == ["net.query"]                   # only the grown bank is partially loaded
+    assert torch.equal(dst.net.kv.weight, src.net.kv.weight)        # machinery transferred whole
+    assert torch.equal(dst.net.query[:4], src.net.query)            # trained rows preserved
+    assert not torch.equal(dst.net.query[4:], dst.net.query[:4])    # extra rows kept at (distinct) init
+    assert dst.net.query.shape == (8, 32)
 
 
 def test_load_compatible_same_shape_loads_everything():

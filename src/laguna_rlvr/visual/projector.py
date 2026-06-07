@@ -79,14 +79,23 @@ class Projector(nn.Module):
         return self.net(x)
 
     def load_compatible(self, sd: dict) -> list[str]:
-        """Warm-start from `sd` (a wrapped checkpoint or a raw projector state_dict), loading only params
-        whose shape matches the current module and leaving the rest at init — e.g. a resized resampler
-        query bank when `n_queries` changed (the cross-attn / kv / FFN weights are shape-independent of
-        query count and input length, so the grounding machinery transfers and only the new queries
-        relearn). Returns the keys left at init."""
+        """Warm-start from `sd` (a wrapped checkpoint or a raw projector state_dict). Exact-shape params
+        load whole; a shape-grown param (e.g. a resampler query bank resized via `n_queries`) keeps its
+        overlapping leading sub-block from `sd` and leaves the remainder at init — so a 256→1024 query
+        bank reproduces the trained 256 queries' grounding and only the extra 768 start fresh, instead of
+        discarding the Stage-1 alignment wholesale. The cross-attn / kv / FFN weights are shape-independent
+        of query count and input length, so they transfer whole. Returns the partially-loaded keys."""
         sd = sd["projector"] if "projector" in sd else sd  # accept the checkpoint envelope or a raw sd
-        own = self.state_dict()
-        keep = {k: v for k, v in sd.items() if k in own and v.shape == own[k].shape}
-        skipped = [k for k in own if k not in keep]
-        self.load_state_dict(keep, strict=False)
-        return skipped
+        partial = []
+        with torch.no_grad():
+            for k, dst in self.state_dict().items():
+                if k not in sd:
+                    continue
+                src = sd[k].to(dst.device, dst.dtype)
+                if src.shape == dst.shape:
+                    dst.copy_(src)
+                else:  # grow/shrink along any dim: copy the overlapping leading block, keep the rest at init
+                    sl = tuple(slice(0, min(a, b)) for a, b in zip(dst.shape, src.shape))
+                    dst[sl].copy_(src[sl])
+                    partial.append(k)
+        return partial
