@@ -64,16 +64,29 @@ class Projector(nn.Module):
     `resampler` = Perceiver connector emitting a fixed token count.
     """
 
-    def __init__(self, d_in: int, d_out: int, kind: str = "linear"):
+    def __init__(self, d_in: int, d_out: int, kind: str = "linear", n_queries: int = 256):
         super().__init__()
         if kind == "linear":
             self.net: nn.Module = nn.Linear(d_in, d_out)
         elif kind == "mlp":
             self.net = nn.Sequential(nn.Linear(d_in, d_out), nn.GELU(), nn.Linear(d_out, d_out))
         elif kind == "resampler":
-            self.net = Resampler(d_in, d_out)
+            self.net = Resampler(d_in, d_out, n_queries=n_queries)
         else:
             raise ValueError(f"unknown projector kind {kind!r} (use 'linear', 'mlp', or 'resampler')")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+    def load_compatible(self, sd: dict) -> list[str]:
+        """Warm-start from `sd` (a wrapped checkpoint or a raw projector state_dict), loading only params
+        whose shape matches the current module and leaving the rest at init — e.g. a resized resampler
+        query bank when `n_queries` changed (the cross-attn / kv / FFN weights are shape-independent of
+        query count and input length, so the grounding machinery transfers and only the new queries
+        relearn). Returns the keys left at init."""
+        sd = sd["projector"] if "projector" in sd else sd  # accept the checkpoint envelope or a raw sd
+        own = self.state_dict()
+        keep = {k: v for k, v in sd.items() if k in own and v.shape == own[k].shape}
+        skipped = [k for k in own if k not in keep]
+        self.load_state_dict(keep, strict=False)
+        return skipped
