@@ -238,8 +238,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         print(f"resuming from step {start_step}/{max_steps}", flush=True)
     elif init_projector:  # warm-start the projector from a prior best.pt, fresh optimizer + step 0
         sd = torch.load(init_projector, map_location=adapter.llm.device)
-        skipped = adapter.projector.load_compatible(sd)
-        note = f" (reinit {', '.join(skipped)} — shape changed, e.g. resized query bank)" if skipped else ""
+        partial = adapter.projector.load_compatible(sd)
+        note = f" (partial-load {', '.join(partial)} — kept overlapping rows, e.g. grown query bank)" if partial else ""
         print(f"warm-started projector from {init_projector} (fresh optimizer, step 0){note}", flush=True)
 
     # Offline when no WANDB_API_KEY (still produces a local trace to sync later); online otherwise.
