@@ -93,6 +93,10 @@ tower. So NaFlex-vs-AnyRes is a same-encoder resolution A/B.
    (`docvqa,infographic_vqa,visualmrc`) on NaFlex, warm-started from the Stage-1 caption checkpoint, swept
    `--lora-rank` ∈ {64,128,256} (W&B `*dociso_r{64,128,256}`, all finished). **Result below: capacity is not the
    bottleneck — docvqa never leaves the noise floor.** Next lever moves to decoder unfreeze / targeted OCR data.
+3. ~~**Decoder-unfreeze + resolution grid**~~ — **DONE** (2026-06-06). 3×2 grid (decoder plasticity × vision
+   tokens), isolated doc family, NaFlex (W&B `*docunf_{moe,topk,attn}_p{1,4}`, all 5 new arms finished). **Result
+   below: clean negative — docvqa stays 0.00 final in every cell.** Neither decoder-FFN plasticity nor finer
+   resolution breaks the wall. Remaining levers are 8-bit-AdamW routed-expert unfreeze or targeted dense-OCR data.
 
 ## Isolation + capacity sweep — docvqa stays at the noise floor
 
@@ -111,3 +115,35 @@ floor. infographic holds ~0.12–0.18 with no rank dependence and stays well und
 0.32. visualmrc is dead flat at 0.00. Quadrupling the LoRA (64→256) buys nothing on the dense-OCR task — the
 adapter isn't capacity-limited, it can't transcribe dense glyphs at all. The next lever is **decoder unfreeze or
 targeted OCR-transcription data**, not bigger adapters or more vision tokens.
+
+## Decoder-unfreeze + resolution grid — the wall holds (clean negative)
+
+Spec: [`docs/specs/2026-06-06-decoder-unfreeze-ocr-wall-design.md`](../../specs/2026-06-06-decoder-unfreeze-ocr-wall-design.md).
+3×2 grid isolating the two remaining levers — **decoder plasticity** (attn-LoRA / lora-moe shared-expert FFN /
+top-k top-4-layer full unfreeze, routed experts kept frozen) × **vision tokens** (`--pool 4` / `--pool 1` finer).
+Document VQA family isolated (`docvqa,infographic_vqa,visualmrc`), NaFlex, warm-started from the 2026-06-05 Stage-1
+caption checkpoint, 3000 steps each. `infographic_vqa` (~0.18 when isolated) is the in-sweep positive control.
+A0 = attn-LoRA·pool4 is the reused `dociso_r128` run. Each cell is **final / peak** over the run:
+
+| decoder × vision | docvqa | infographic_vqa *(control)* | visualmrc |
+|---|---|---|---|
+| attn-LoRA · pool4 *(=A0, `dociso_r128`)* | 0.00 / 0.067 | 0.12 / 0.12 | 0.00 / 0.00 |
+| **lora-moe** · pool4 | 0.00 / 0.00 | 0.18 / 0.18 | 0.00 / 0.00 |
+| **top-k** · pool4 | 0.00 / 0.00 | 0.06 / 0.06 | 0.00 / 0.00 |
+| attn-LoRA · **pool1** | 0.00 / 0.033 | 0.06 / 0.06 | 0.05 / 0.05 |
+| **lora-moe** · **pool1** | 0.00 / 0.00 | 0.12 / 0.18 | 0.05 / 0.05 |
+| **top-k** · **pool1** | 0.00 / 0.00 | 0.12 / 0.12 | 0.00 / 0.00 |
+
+**Reading — decoder plasticity and finer tokens both fail; it's a base-decoder reading limit.** docvqa is **0.00
+final in every cell**, peak only flickering to 0.033–0.067 (1–2 items / ~30) — the same noise floor as the capacity
+sweep. Neither lever moves it: (1) decoder-FFN plasticity (lora-moe) and full top-k unfreeze add nothing on
+docvqa, and top-k actually *traded down* the one live task (infographic 0.06 vs A0's 0.12) — the extra unfrozen
+params compete against the capability that existed. (2) Finer vision tokens (pool 1) don't lift docvqa either;
+visualmrc's 0.045 is a single item. The infographic control stayed alive (0.06–0.18) the whole time, so the eval
+is sound and the 0.00s are real transcription failures, not a broken harness.
+
+**No winning config to promote** → the all-tasks generalization rerun is moot for this sweep (nothing lifted
+docvqa to generalize). The OCR-dense wall has now survived backbone swaps, LoRA-rank 64→256, decoder-FFN
+plasticity, top-k full unfreeze, and finer resolution — strong evidence it's a **base-decoder dense-OCR
+transcription limit**, not an adapter / capacity / resolution one. Remaining levers are heavier: 8-bit-AdamW
+routed-expert unfreeze, or targeted dense-OCR transcription pretraining data.
