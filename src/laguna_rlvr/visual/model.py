@@ -128,6 +128,7 @@ class VisualAdapter(nn.Module):
         norm_penalty: float = 0.0,
         lora_rank: int = 16,
         unfreeze_layers: int = 4,
+        n_queries: int = 256,
     ):
         super().__init__()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -154,7 +155,7 @@ class VisualAdapter(nn.Module):
         self.llm.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
-        self.projector = Projector(encoder.d_enc, self.llm.config.hidden_size, projector_kind)
+        self.projector = Projector(encoder.d_enc, self.llm.config.hidden_size, projector_kind, n_queries=n_queries)
         self.projector.to(device=self.llm.device, dtype=self.llm.dtype)
         # frozen backbone => its native-embedding norm scale is constant; cache the median once so the
         # base-preservation gauge (embedding_norm_ratio) doesn't re-reduce the full vocab table per call.

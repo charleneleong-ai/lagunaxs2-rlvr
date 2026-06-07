@@ -122,7 +122,7 @@ class Siglip2NaflexEncoder:
 
 
 def load_encoder(name: str, pool: int = 1, dtype: torch.dtype | None = None,
-                 device: str | None = None):
+                 device: str | None = None, grid: int = 2):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     dtype = dtype or (torch.bfloat16 if device.startswith("cuda") else torch.float32)
     if name == "siglip_naflex":
@@ -136,7 +136,8 @@ def load_encoder(name: str, pool: int = 1, dtype: torch.dtype | None = None,
         for p in tower.parameters():
             p.requires_grad_(False)
         processor = AutoImageProcessor.from_pretrained(_SIGLIP_REPO)
-        return SiglipAnyResEncoder(tower=tower, processor=processor, d_enc=tower.config.hidden_size, pool=pool)
+        return SiglipAnyResEncoder(tower=tower, processor=processor, d_enc=tower.config.hidden_size,
+                                   pool=pool, grid=grid)
     if name not in _REPOS:
         raise ValueError(f"unknown encoder {name!r}; choose from {list(_REPOS) + ['siglip', 'siglip_naflex']}")
     repo = _REPOS[name]

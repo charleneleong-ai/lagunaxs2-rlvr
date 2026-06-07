@@ -144,7 +144,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           objective: str = "recon", unfreeze: str = "", use_anchor: bool = True,
           lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0,
           qa_eval_n: int = 40, lora_rank: int = 16, design_codegen: bool = False, tasks: str = "",
-          unfreeze_layers: int = 4, unfreeze_lr_mult: float = 0.1) -> Path:
+          unfreeze_layers: int = 4, unfreeze_lr_mult: float = 0.1,
+          grid: int = 2, n_queries: int = 256) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -160,10 +161,10 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     if base == plan.backbone_model and issues:
         raise SystemExit("Guardrail failures for the configured backbone:\n- " + "\n- ".join(issues))
 
-    enc = load_encoder(encoder, pool=pool)
+    enc = load_encoder(encoder, pool=pool, grid=grid)
     adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze,
                             use_anchor=use_anchor, norm_penalty=norm_penalty, lora_rank=lora_rank,
-                            unfreeze_layers=unfreeze_layers)
+                            unfreeze_layers=unfreeze_layers, n_queries=n_queries)
     opt = torch.optim.AdamW(adapter.optimizer_param_groups(lr, base_lr=lr * unfreeze_lr_mult))
 
     # Mixture weights: explicit --mixture always wins. Otherwise the config's [mixture].weights is the
@@ -237,8 +238,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         print(f"resuming from step {start_step}/{max_steps}", flush=True)
     elif init_projector:  # warm-start the projector from a prior best.pt, fresh optimizer + step 0
         sd = torch.load(init_projector, map_location=adapter.llm.device)
-        adapter.projector.load_state_dict(sd["projector"] if "projector" in sd else sd)
-        print(f"warm-started projector from {init_projector} (fresh optimizer, step 0)", flush=True)
+        skipped = adapter.projector.load_compatible(sd)
+        note = f" (reinit {', '.join(skipped)} — shape changed, e.g. resized query bank)" if skipped else ""
+        print(f"warm-started projector from {init_projector} (fresh optimizer, step 0){note}", flush=True)
 
     # Offline when no WANDB_API_KEY (still produces a local trace to sync later); online otherwise.
     run = None
@@ -260,7 +262,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
                          id=resume_id, resume="allow" if resume_id else None,
                          config={"base": base, "encoder": encoder, "projector": projector_kind,
                                  "dataset": dataset, "lr": lr, "max_steps": max_steps,
-                                 "grad_accum": grad_accum, "n_train": n_train, "seed": seed})
+                                 "grad_accum": grad_accum, "n_train": n_train, "seed": seed,
+                                 "pool": pool, "grid": grid, "n_queries": n_queries})
         if start_step == 0:  # sample tables log at step 0 — skip when rejoining a resumed run
             _log_samples(run, train_ds, "train/samples")
             _log_samples(run, val_ds, "val/samples")
@@ -459,11 +462,13 @@ def main(
     lora_rank: int = typer.Option(16, help="attention-LoRA rank (alpha=2r); raise to test if capacity caps reading"),
     design_codegen: bool = typer.Option(False, help="train html/python corpora as screenshot->code generation (full code answer) vs title-reading"),
     tasks: str = typer.Option("", help="task->dataset lookup: comma list of capabilities (e.g. 'vqa,design,ocr'); composes mix+vqa+design-codegen, overrides --mixture/--vqa"),
+    grid: int = typer.Option(2, help="AnyRes tile grid (siglip encoder): 1+grid^2 tiles, effective res = 384*grid; raise for glyph-readable dense docs"),
+    n_queries: int = typer.Option(256, help="resampler output tokens fed to the decoder; raise to widen the dense-OCR squeeze (warm-start reinits the resized query bank)"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
           objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n, lora_rank, design_codegen, tasks,
-          unfreeze_layers, unfreeze_lr_mult)
+          unfreeze_layers, unfreeze_lr_mult, grid, n_queries)
 
 
 if __name__ == "__main__":
