@@ -38,9 +38,9 @@ def _cfg_name(dataset: str, suffix: str) -> str:
     return f"glm_ocr__Laguna-XS.2__{dataset}__{suffix}".lower()
 
 
-def _train(*args: str, pool: str = "1") -> list[str]:
+def _train(*args: str, pool: str = "1", cfg: str = CFG) -> list[str]:
     return [sys.executable, "-u", "-m", "laguna_rlvr.visual.train",
-            "--config", CFG, "--base", BASE, "--encoder", "glm_ocr",
+            "--config", cfg, "--base", BASE, "--encoder", "glm_ocr",
             "--projector", "resampler", "--anchor", "--lr", "2e-5",
             "--n-queries", "256", "--pool", pool, *args]
 
