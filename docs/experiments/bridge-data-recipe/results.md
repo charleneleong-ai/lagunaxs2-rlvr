@@ -97,6 +97,15 @@ tower. So NaFlex-vs-AnyRes is a same-encoder resolution A/B.
    tokens), isolated doc family, NaFlex (W&B `*docunf_{moe,topk,attn}_p{1,4}`, all 5 new arms finished). **Result
    below: clean negative — docvqa stays 0.00 final in every cell.** Neither decoder-FFN plasticity nor finer
    resolution breaks the wall. Remaining levers are 8-bit-AdamW routed-expert unfreeze or targeted dense-OCR data.
+4. ~~**Resampler-bottleneck (representation) sweep**~~ — **DONE** (2026-06-07). AnyRes grid × resampler
+   `n_queries`, isolated doc family (W&B `*docres_{base_g2q256,g2q1024_wq,g4q1024_wq}`). **Result below: wider
+   output *hurts* — 256→1024 latents collapsed the control (not a warm-start artifact; confirmed with the
+   overlap-copy fix) and docvqa stays 0.** Representation is not the lever → the wall is the frozen decoder.
+5. **Pivot: agentic / OCR-tool route.** Every cheap lever (encoder, capacity, decoder plasticity, resolution,
+   resampler width) is exhausted with docvqa flat at 0. Give the model an OCR tool in its harness and let it reason
+   over returned text (an RLVR framing), rather than chasing native end-to-end dense transcription from a frozen
+   decoder. The one remaining native variant — from-scratch Stage-1 alignment at high `n_queries` — is expensive
+   and lower expected-value.
 
 ## Isolation + capacity sweep — docvqa stays at the noise floor
 
@@ -147,3 +156,35 @@ docvqa to generalize). The OCR-dense wall has now survived backbone swaps, LoRA-
 plasticity, top-k full unfreeze, and finer resolution — strong evidence it's a **base-decoder dense-OCR
 transcription limit**, not an adapter / capacity / resolution one. Remaining levers are heavier: 8-bit-AdamW
 routed-expert unfreeze, or targeted dense-OCR transcription pretraining data.
+
+## Resampler-bottleneck (representation) sweep — wider output *hurts*, the wall is the decoder
+
+Spec: [`docs/specs/2026-06-07-resampler-bottleneck-ocr-wall-design.md`](../../specs/2026-06-07-resampler-bottleneck-ocr-wall-design.md).
+The decoder-unfreeze negative left **representation** as the last cheap lever. Key facts behind this sweep: NaFlex
+hard-caps at **256 encoder patches** (an A4 page → ~190 px/patch, glyphs destroyed *at the encoder*), and **all
+three matrix runs used `projector=resampler`** — so every tower (NaFlex 256 patches, AnyRes 2880@768 px, Qwen3-VL
+dynamic) was squeezed to the resampler's fixed **256 output latents** before the frozen decoder. 256 vision tokens
+for a thousand-glyph page is the shared throttle no encoder swap escaped. This sweep widens it: AnyRes `siglip`
+(in-distribution 384² tiles, warm-started from the NaFlex Stage-1 ckpt — same `d_enc`=1152), isolated doc family,
+`--pool 1`, 3000 steps. `infographic_vqa` (~0.18 isolated) is the control. Each cell is **final / peak**:
+
+| grid (input res) × n_queries | docvqa | infographic_vqa *(control)* | visualmrc |
+|---|---|---|---|
+| grid 2 (768 px) × **256** *(`base_g2q256`)* | 0.00 / 0.033 | **0.176 / 0.176** | 0.00 / 0.00 |
+| grid 2 (768 px) × **1024** *(`g2q1024_wq`)* | 0.00 / 0.00 | **0.00 / 0.00** | 0.00 / 0.00 |
+| grid 4 (1536 px) × **1024** *(`g4q1024_wq`)* | 0.00 / 0.00 | **0.00 / 0.00** | 0.00 / 0.00 |
+
+**Reading — widening the resampler output is not the lever; it destabilizes.** docvqa stays **0.00 final** in
+every cell. Critically, going 256→1024 latents **collapsed the control** (infographic 0.176 → 0.00) — and this is
+*not* a warm-start artifact: a first run reinit'd the resized query bank from scratch; this rerun fixed
+`load_compatible` to **overlap-copy** the trained 256 rows (keeping the Stage-1 grounding, only the extra 768 fresh,
+commit `d34007a`) and the control collapsed *identically*. So the extra 768 vision tokens act as distractors the
+frozen decoder (+ attn-LoRA, tuned for 256 tokens) can't use — they kill the one task that worked while doing
+nothing for dense OCR. Glyph-readable 1536 px input (grid 4) doesn't move docvqa either.
+
+**The representation line is exhausted.** The wall is now *not* resolution, *not* the 256-latent squeeze (wider
+hurts), *not* decoder plasticity, *not* adapter capacity, *not* the encoder tower. Every cheap lever points at the
+same place: the **frozen Laguna decoder cannot transcribe dense glyphs**, and more vision tokens make it worse, not
+better. The only untested representation variant is a *from-scratch* Stage-1 alignment at high `n_queries` (vs
+warm-start) — expensive, and the cost/expected-value now favors the **pivot to an agentic / OCR-tool route** (give
+the model an OCR tool in its harness) over chasing native end-to-end dense reading.
