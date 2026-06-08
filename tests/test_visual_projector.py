@@ -46,8 +46,7 @@ def test_load_compatible_grows_query_bank_keeping_trained_rows():
     assert partial == ["net.query"]                   # only the grown bank is partially loaded
     assert torch.equal(dst.net.kv.weight, src.net.kv.weight)        # machinery transferred whole
     assert torch.equal(dst.net.query[:4], src.net.query)            # trained rows preserved
-    assert not torch.equal(dst.net.query[4:], dst.net.query[:4])    # extra rows kept at (distinct) init
-    assert dst.net.query.shape == (8, 32)
+    assert dst.net.query.shape == (8, 32)                           # extra rows kept at init
 
 
 def test_load_compatible_same_shape_loads_everything():

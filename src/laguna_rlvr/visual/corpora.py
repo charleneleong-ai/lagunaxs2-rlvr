@@ -318,10 +318,11 @@ def compose_sft(task_names: list[str]) -> dict:
                 if d not in REGISTRY:
                     raise ValueError(f"task {t!r} dataset {d!r} not in REGISTRY")
                 mix.append((d, 1.0))
-            codegen = codegen or spec["mode"] == "codegen"
-    # dedup: overlapping tasks (e.g. vqa+chart both list chartqa) must not double-load a set
+            if spec["mode"] == "codegen":
+                codegen = True
+    # dedup by corpus name: overlapping tasks (e.g. vqa+chart both list chartqa) must not double-load a set
     vqa = list(dict.fromkeys(vqa))
-    mix = list(dict.fromkeys(mix))
+    mix = [(d, 1.0) for d in dict.fromkeys(d for d, _ in mix)]
     return {"mix": mix or None, "vqa": vqa, "design_codegen": codegen}
 
 
