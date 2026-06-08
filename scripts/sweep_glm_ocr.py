@@ -38,11 +38,11 @@ def _cfg_name(dataset: str, suffix: str) -> str:
     return f"glm_ocr__Laguna-XS.2__{dataset}__{suffix}".lower()
 
 
-def _train(*args: str) -> list[str]:
+def _train(*args: str, pool: str = "1") -> list[str]:
     return [sys.executable, "-u", "-m", "laguna_rlvr.visual.train",
             "--config", CFG, "--base", BASE, "--encoder", "glm_ocr",
             "--projector", "resampler", "--anchor", "--lr", "2e-5",
-            "--n-queries", "256", "--pool", "1", *args]
+            "--n-queries", "256", "--pool", pool, *args]
 
 
 def _stage1() -> IterPlan:

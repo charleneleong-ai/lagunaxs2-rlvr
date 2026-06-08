@@ -27,14 +27,15 @@ class AllTasksPlan:
                        "--tasks", "vqa,chart,document,design,ocr",
                        "--unfreeze", "lora", "--lora-rank", "128",
                        "--init-projector", str(STAGE1_CKPT),
-                       "--name-suffix", "glmocr_alltasks", "--steps", "3000", "--n-train", "16000",
+                       "--name-suffix", "glmocr_alltasks_p2", "--steps", "3000", "--n-train", "16000",
                        "--qa-eval-n", "160", "--resume",
                        "--description", "GLM-OCR all-tasks Stage-2 (12 VQA + design-codegen + ocr mix), "
                        "warm-started from the GLM-OCR Stage-1 caption ckpt. Like-for-like with the "
                        "siglip/qwen stage2*_alltasks matrix arms (only --encoder differs). Fills the "
-                       "GLM-OCR matrix row + resolves the vqav2 confound before any decoder unfreeze."),
+                       "GLM-OCR matrix row + resolves the vqav2 confound before any decoder unfreeze.",
+                       pool="2"),  # pool=2 halves resampler patches: the all-tasks 12-corpus mix OOMs at pool=1
             description="glm-ocr all-tasks (12 VQA + design + ocr)",
-            config_name=_cfg_name("mix", "glmocr_alltasks"),
+            config_name=_cfg_name("mix", "glmocr_alltasks_p2"),
             timeout_min=360,
         )
 
