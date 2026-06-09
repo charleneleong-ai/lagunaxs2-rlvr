@@ -59,7 +59,10 @@ def render_instructions(tools: list[Tool], fmt: str) -> str:
 
 
 _LINE_RE = re.compile(r"^\s*(\w+)\s*:\s*(.+?)\s*$", re.M)
-_XML_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S | re.I)
+# Closing </tool_call> is optional: LLMs reliably emit the opening tag + JSON but often drop the close
+# (e.g. `<tool_call>{"name": "ocr", ...}}` with trailing junk). Greedy `\{.*\}` spans the nested
+# arguments object up to the last brace; _loads validates, so over-capture just fails closed.
+_XML_RE = re.compile(r"<tool_call>\s*(\{.*\})\s*(?:</tool_call>)?", re.S | re.I)
 _OBJ_RE = re.compile(r"\{[^{}]*\}", re.S)
 # poolside_v1: <tool_call>NAME <arg_key>K</arg_key> <arg_value>V</arg_value> </tool_call>
 _POOLSIDE_RE = re.compile(r"<tool_call>\s*(\w+).*?<arg_value>\s*(.*?)\s*</arg_value>", re.S | re.I)

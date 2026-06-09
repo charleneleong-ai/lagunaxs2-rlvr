@@ -5,4 +5,7 @@
 module: ocr_tool
 args:
   max_turns: 4
+  # 'native' = structured tool_calls (the charitable go/no-go: isolates loop capability from
+  # custom-syntax facility); 'mixed' round-robins line/xml/json/poolside/native for robustness.
+  scaffold: native
   # efficiency_weight is merged in from the reward config group by probe.py

@@ -39,3 +39,14 @@ def test_normalize_records_projects_onto_success_reward():
         {"success": True, "reward": 1.0},
         {"success": False, "reward": 0.0},
     ]
+
+
+def test_normalize_records_tolerates_underscored_and_nested_keys():
+    # verifiers names rubric-func metrics with a leading underscore (`_success`) and also nests
+    # them under `metrics` — the probe must read both without a config change.
+    raw = [{"_success": 1.0, "reward": 0.9},                       # `_`-prefixed top-level
+           {"metrics": {"_success": 0.0, "reward": 0.1}}]          # nested under metrics
+    assert normalize_records(raw, "success", "reward") == [
+        {"success": True, "reward": 0.9},
+        {"success": False, "reward": 0.1},
+    ]

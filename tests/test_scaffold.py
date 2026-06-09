@@ -37,6 +37,15 @@ class TestParseRobustness:
         msg = 'let me read it first\n<tool_call>{"name":"answer","arguments":{"value":"7"}}</tool_call>'
         assert parse_call(msg, "xml", _TOOLS) == ("answer", "7")
 
+    @pytest.mark.parametrize("msg", [
+        '<tool_call>{"name": "ocr", "arguments": {"image_id": "receipt.png"}}\n',        # close dropped
+        '<tool_call>{"name": "ocr", "arguments": {"image_id": "receipt.png"}}play\n',    # close dropped + junk
+    ])
+    def test_xml_tolerates_missing_closing_tag(self, msg):
+        # Laguna reliably emits the opening tag + valid JSON but often omits </tool_call>; the parser
+        # must still recover the call (this was the sole cause of the xml-scaffold baseline failures).
+        assert parse_call(msg, "xml", _TOOLS) == ("ocr", "receipt.png")
+
     def test_strips_trailing_punctuation(self):
         assert parse_call("ocr: invoice.png.", "line", _TOOLS) == ("ocr", "invoice.png")
 

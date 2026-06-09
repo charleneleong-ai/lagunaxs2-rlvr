@@ -1,0 +1,8 @@
+# The currently-served Laguna on Prime inference ($0). The earlier `poolside/laguna-xs.2` inference
+# id is retired (404s); `poolside/laguna-m.1` is what the endpoint serves now — and it's the model the
+# agentic OCR-tool route actually deploys against. Use `model=laguna_m1` to opt in (protects quota).
+name: poolside/laguna-m.1
+slug: laguna
+provider: prime
+max_tokens: 8192
+temperature: 0.7
