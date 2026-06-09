@@ -1,0 +1,8 @@
+# Multi-turn OCR-as-tool baseline: the model can't see the doc image — it must call ocr(image_id)
+# to read it, then answer. Measures the agent loop (decide to call ocr -> parse field -> answer),
+# the skill the agentic-OCR RLVR route would lift. Default backend is mock (perfect extraction),
+# which isolates the loop+reasoning from OCR noise; swap to a real GLM-OCR backend for end-to-end.
+module: ocr_tool
+args:
+  max_turns: 4
+  # efficiency_weight is merged in from the reward config group by probe.py

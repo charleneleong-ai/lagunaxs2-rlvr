@@ -50,6 +50,13 @@ class TestEnv:
             assert row["info"]["text"], "doc text needed for the ocr tool"
         assert len({r["info"]["fmt"] for r in rows}) >= 2, "'mixed' must vary the scaffold across rows"
 
+    def test_spans_the_glyph_subset_categories(self):
+        # The baseline must cover the glyph tasks where the adapter hit the wall, not just toy invoices.
+        cats = {d["cat"] for d in ocr_tool._BUILTIN_DOCS}
+        assert cats == {"docvqa", "ocrvqa", "infographic", "visualmrc", "chart"}
+        rows = ocr_tool.load_environment(scaffold="line").eval_dataset.to_list()
+        assert all(r["info"]["category"] in cats for r in rows)
+
     @pytest.mark.parametrize("fmt", ["line", "xml", "json", "poolside"])
     def test_ocr_then_answer_solves_in_each_scaffold(self, fmt):
         env = ocr_tool.load_environment(scaffold=fmt)
