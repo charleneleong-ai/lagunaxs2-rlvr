@@ -49,6 +49,35 @@ Each cell **final / peak**:
 Side-finding: GLM-OCR is also a strong *general* encoder here (vqav2 0.605 > SigLIP-AnyRes/Qwen3-VL's ~0.48–0.64
 on their suites) — relevant if a future feature-fusion encoder wants breadth.
 
+## All-tasks profile + decoder unfreeze (the final native tests)
+
+GLM-OCR on the full 12-task suite (`--tasks vqa,chart,document,design,ocr`, warm-started, micro_batch=1 +
+pool=2 to fit memory), attn-LoRA vs decoder-unfreeze (`lora-moe` shared-expert FFN). Each **final / peak**:
+
+| task | attn-LoRA (`glmocr_alltasks_mb1`) | decoder-unfreeze (`glmocr_alltasks_moe`) | NaFlex/AnyRes/Qwen (matrix) |
+|---|---|---|---|
+| vqav2 | 0.56 | 0.44 | 0.48 / 0.40 / 0.48 |
+| visual7w | 0.57 | 0.50 | 0.57 / 0.64 / 0.64 |
+| figureqa | 1.00 | 0.95 | 0.95 / 0.95 / 0.95 |
+| plotqa | 0.38 / 0.50 | 0.44 / 0.62 | 0.50 / 0.56 / 0.38 |
+| dvqa | 0.06 | 0.00 | 0.06 / 0.06 / 0.12 |
+| textvqa | 0.31 | 0.23 | 0.23 / 0.23 / 0.23 |
+| chartqa | 0.33 | 0.33 | 0.33 / 0.00 / 0.00 |
+| chart2text | 0.00 | 0.00 | 0.00 / 0.00 / 0.00 |
+| **docvqa** | 0.00 / 0.00 | **0.00 / 0.25** | 0.00 / 0.00 / 0.00 |
+| ocrvqa | 0.00 | 0.00 | 0.00 / 0.00 / 0.00 |
+| infographic_vqa | 0.33 | 0.33 | 0.33 / 0.00 / 0.00 |
+| visualmrc | 0.00 | 0.00 | 0.00 / 0.00 / 0.00 |
+| **overall qa_acc** | **0.34** | **0.30** | — |
+
+**Reading.** (1) GLM-OCR's all-tasks profile sits **right in the pack** — grounds the sparse/chart tasks
+like the others, dense tasks 0. The vqav2 confound is resolved: 0.56 on all-tasks (not the 0.61 isolated),
+in line with the others. (2) **Decoder unfreeze is the final native test and it fails**: `lora-moe` FFN
+plasticity made docvqa **peak 0.25 once but final 0** (the same single-eval flicker AnyRes showed — not a
+sustained lift), every other dense task stayed dead, **and it regressed the working tasks** (vqav2/visual7w/
+figureqa/textvqa/dvqa all down, overall 0.34→0.30). Even glyph-rich features + FFN plasticity — the one
+untested combination — doesn't move dense OCR, and unfreezing actively hurts. The decoder is best left frozen.
+
 ## Next move
 
 **Pivot to the agentic / OCR-tool route** — the only avenue that doesn't require the frozen decoder to transcribe
