@@ -41,6 +41,9 @@ from laguna_rlvr.visual.multiturn_qa import _match
 # the 12-task matrix from docs/experiments/glm-ocr-encoder/results.md, in that row order
 DEFAULT_VQA = ("vqav2,visual7w,figureqa,plotqa,dvqa,textvqa,chartqa,chart2text,"
                "docvqa,ocrvqa,infographic_vqa,visualmrc")
+# the glyph corpora the OCR tool can actually answer (the transcript carries the answer) — semantic
+# corpora (vqav2/visual7w) are excluded: OCR returns nothing useful, so the loop can only fail them.
+GLYPH_VQA = "textvqa,chartqa,dvqa,docvqa,ocrvqa,infographic_vqa,visualmrc"
 CONFIGS = ("encoder", "tool", "encoder_tool")
 _ANSWER = "\nAnswer:"
 
@@ -72,6 +75,26 @@ def accuracy_matrix(hits: dict[str, dict[str, list[int]]]) -> dict[str, dict[str
         tot_h, tot_n = (sum(v) for v in zip(*per_corpus.values())) if per_corpus else (0, 0)
         out[config] = {"overall": tot_h / max(tot_n, 1), **acc}
     return out
+
+
+def _lcs_len(a: list[str], b: list[str]) -> int:
+    dp = [0] * (len(b) + 1)
+    for x in a:
+        prev = 0
+        for j, y in enumerate(b, 1):
+            prev, dp[j] = dp[j], (prev + 1 if x == y else max(dp[j], dp[j - 1]))
+    return dp[len(b)]
+
+
+def rouge_l_f1(gold: str, pred: str) -> float:
+    """LCS-based ROUGE-L F1 (lowercased token overlap). For free-form caption tasks where exact/substring
+    `_match` scores a semantically-right-but-differently-worded caption 0 — a metric artifact, not a gap."""
+    g, p = gold.lower().split(), pred.lower().split()
+    lcs = _lcs_len(g, p)
+    if not lcs:
+        return 0.0
+    prec, rec = lcs / len(p), lcs / len(g)
+    return 2 * prec * rec / (prec + rec)
 
 
 def load_items(vqa_names: list[str], n: int) -> list[tuple]:
@@ -197,6 +220,52 @@ def bakeoff(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({"n": n, "configs": cfgs, "matrix": matrix}, indent=2))
     print(f"\nwrote {out_path}", flush=True)
+
+
+@app.command()
+def rescore(
+    preds: str = typer.Option("results/tool_eval/preds.jsonl", help="bake-off per-item preds"),
+    caption: str = typer.Option("chart2text", help="comma list of free-form caption corpora"),
+) -> None:
+    """Re-score the caption corpora with ROUGE-L F1. exact/substring `_match` scores a correct paragraph-
+    length caption 0 (different surface words) — a measurement artifact. NB the bake-off caps generation at
+    24 tokens, so this is a partial-credit floor; a fair caption number also needs longer generation."""
+    rows = [json.loads(line) for line in Path(preds).read_text().splitlines() if line.strip()]
+    cap = {s for s in caption.split(",") if s}
+    agg: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for r in rows:
+        if r["corpus"] in cap:
+            agg[(r["config"], r["corpus"])].append(rouge_l_f1(r["gold"], r["pred"]))
+    for (config, corpus), scores in sorted(agg.items()):
+        print(f"{config:14} {corpus:12} ROUGE-L {sum(scores) / len(scores):.2f}  "
+              f"(exact-match 0.00, n={len(scores)})", flush=True)
+
+
+@app.command("build-docs")
+def build_docs(
+    keep: str = typer.Option(GLYPH_VQA, help="corpora to keep in the pack (OCR-answerable glyph tasks)"),
+    n: int = typer.Option(40, help="items per corpus"),
+    out: str = typer.Option("results/tool_eval/loop_docs.jsonl", help="docs-pack path"),
+) -> None:
+    """Emit a {cat,id,text,q,a} docs pack for the agentic loop: real corpus questions/golds with the
+    cached (noisy) GLM-OCR transcript as `text`. Reuses the full-suite transcript cache (no GPU) and
+    keeps only the glyph corpora the tool can answer, so the loop runs end-to-end on real OCR noise."""
+    full = [s for s in DEFAULT_VQA.split(",") if s]
+    transcripts = _ensure_transcripts(full, n, _transcript_path(full, n))
+    items = load_items(full, n)
+    assert len(transcripts) == len(items), f"{len(transcripts)} transcripts vs {len(items)} items"
+    keep_set = {s for s in keep.split(",") if s}
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    kept = 0
+    with out_path.open("w") as f:
+        for i, (t, (corpus, _img, q, gold)) in enumerate(zip(transcripts, items)):
+            if corpus not in keep_set:
+                continue
+            f.write(json.dumps({"cat": corpus, "id": f"{corpus}_{i}.png",
+                                "text": t, "q": q, "a": str(gold)}) + "\n")
+            kept += 1
+    print(f"[build-docs] kept {kept}/{len(items)} docs ({sorted(keep_set)}) -> {out_path}", flush=True)
 
 
 if __name__ == "__main__":

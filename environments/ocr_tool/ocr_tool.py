@@ -12,7 +12,9 @@ noise. Either way the eval scores the agent loop: decide to call ocr, parse the 
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 import verifiers as vf
 from datasets import Dataset
@@ -92,7 +94,9 @@ _NORM_RE = re.compile(r"[\s$,]")
 
 
 def _norm(s: str) -> str:
-    return _NORM_RE.sub("", s.strip().lower())
+    # strip surrounding sentence punctuation too (real VQA golds are terse like "Soil." / "Land.") —
+    # but only at the ends, so internal dots survive for float golds ("42.50").
+    return _NORM_RE.sub("", s.strip().lower()).strip(".!?")
 
 
 def _match(gold: str, guess: str) -> bool:
@@ -122,8 +126,10 @@ class OCRToolEnv(vf.MultiTurnEnv):
             fmt = resolve_format(i, scaffold)
             instr = ("Use the available tools to read the image, then answer." if fmt == "native"
                      else render_instructions(_TOOLS, fmt))
-            question = (f"You have a task about a document IMAGE you cannot see directly.\n\n"
-                        f"Task: {d['q']}\n\n{instr}")
+            # State the image id explicitly: real corpus questions don't name the file, so without this
+            # the model has no handle to pass to ocr() and the loop is impossible (it just asks for the id).
+            question = (f"You have a task about an IMAGE (id: {d['id']}) you cannot see directly.\n"
+                        f"Call ocr on that id to read its text, then answer.\n\nTask: {d['q']}\n\n{instr}")
             rows.append({"question": question, "answer": d["a"],
                          "info": {"image_id": d["id"], "text": d["text"], "answer": d["a"],
                                   "category": d["cat"], "fmt": fmt}})
@@ -172,7 +178,12 @@ class OCRToolEnv(vf.MultiTurnEnv):
 
 
 def load_environment(max_turns: int = 4, efficiency_weight: float = 0.1,
-                     scaffold: str = "mixed", **kwargs) -> vf.Environment:
-    """scaffold: 'line'|'xml'|'json'|'poolside' (text syntax) · 'mixed' (round-robin) · 'native' (structured tool_calls)."""
-    return OCRToolEnv(_BUILTIN_DOCS, max_turns=max_turns, efficiency_weight=efficiency_weight,
-                      scaffold=scaffold)
+                     scaffold: str = "mixed", docs_path: str = "", **kwargs) -> vf.Environment:
+    """scaffold: 'line'|'xml'|'json'|'poolside' (text syntax) · 'mixed' (round-robin) · 'native' (structured tool_calls).
+    docs_path: a {cat,id,text,q,a} JSONL pack (real corpus questions + noisy GLM-OCR transcripts as `text`,
+    built by `tool_eval build-docs`) — the end-to-end real-OCR loop. Empty = the mock perfect-text builtin docs."""
+    if docs_path:
+        docs = [json.loads(line) for line in Path(docs_path).read_text().splitlines() if line.strip()]
+    else:
+        docs = _BUILTIN_DOCS
+    return OCRToolEnv(docs, max_turns=max_turns, efficiency_weight=efficiency_weight, scaffold=scaffold)

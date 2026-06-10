@@ -53,8 +53,12 @@ The two channels carry different information and the decoder fuses them:
 - **Combined, several cells go super-additive** — `visualmrc` 0/0 → **0.15**, `textvqa` 0.03/0.10 →
   **0.33**, `vqav2` 0.23/0.05 → **0.38**, `ocrvqa` beats both at **0.45**. The grounding and the
   transcript aren't redundant; each rescues items the other misses.
-- **`chart2text` stays 0.00 everywhere** — long free-form caption generation that the loosened `_match`
-  scores harshly; not an architecture signal.
+- **`chart2text` is a metric artifact, not a dead task.** It's 0.00 under exact/substring `_match` because
+  free-form captions don't string-match the gold (pred "crude birth rate in Germany 1805" vs gold "…in
+  France 1800" — right domain, wrong specifics). Re-scored with ROUGE-L (`tool_eval rescore`) the same
+  complementarity holds: encoder 0.15 < **encoder_tool 0.18**, tool 0.11 — the transcript adds on top of
+  grounding even for captioning. (A partial-credit floor: generation is capped at 24 tokens, so a fair
+  caption number also needs longer decoding — a separate lever.)
 
 ## Reading
 

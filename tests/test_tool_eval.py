@@ -1,6 +1,6 @@
 import pytest
 
-from laguna_rlvr.visual.tool_eval import accuracy_matrix, assemble_prompt
+from laguna_rlvr.visual.tool_eval import accuracy_matrix, assemble_prompt, rouge_l_f1
 from laguna_rlvr.visual.model import IMAGE_TOKEN
 
 
@@ -32,3 +32,20 @@ class TestAccuracyMatrix:
 
     def test_empty_is_zero_not_crash(self):
         assert accuracy_matrix({"encoder": {}})["encoder"] == {"overall": 0.0}
+
+
+class TestRougeL:
+    def test_identical_is_one(self):
+        assert rouge_l_f1("crude birth rate in France", "crude birth rate in France") == 1.0
+
+    def test_disjoint_is_zero(self):
+        assert rouge_l_f1("crude birth rate", "social media platforms") == 0.0
+
+    def test_partial_overlap_credits_subsequence(self):
+        # the metric artifact this fixes: right domain, wrong specifics — exact match scores 0, ROUGE-L > 0
+        score = rouge_l_f1("crude birth rate in France 1800", "crude birth rate in Germany 1805")
+        assert 0.0 < score < 1.0
+
+    @pytest.mark.parametrize("gold,pred", [("", "x"), ("x", "")])
+    def test_empty_side_is_zero(self, gold, pred):
+        assert rouge_l_f1(gold, pred) == 0.0

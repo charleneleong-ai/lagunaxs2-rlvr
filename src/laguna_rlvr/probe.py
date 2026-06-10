@@ -57,7 +57,9 @@ def _load_raw_results(output_dir: Path) -> list[dict]:
 def main(cfg: DictConfig) -> None:
     probe_dir = Path(cfg.paths.results) / "probe"
     probe_dir.mkdir(parents=True, exist_ok=True)
-    raw_dir = probe_dir / f"_raw_{cfg.env.module}__{cfg.model.slug}"
+    # `tag` disambiguates output paths when two confs share one env module (e.g. ocr_tool mock vs real).
+    tag = cfg.env.get("tag", cfg.env.module)
+    raw_dir = probe_dir / f"_raw_{tag}__{cfg.model.slug}"
 
     env_args = {**OmegaConf.to_container(cfg.env.args, resolve=True),
                 **OmegaConf.to_container(cfg.reward, resolve=True)}  # reward group flows into the env
@@ -69,7 +71,7 @@ def main(cfg: DictConfig) -> None:
     subprocess.run(cmd, check=True)
 
     records = normalize_records(_load_raw_results(raw_dir), cfg.probe.success_key, cfg.probe.reward_key)
-    out = probe_dir / f"{cfg.env.module}__{cfg.model.slug}.jsonl"
+    out = probe_dir / f"{tag}__{cfg.model.slug}.jsonl"
     out.write_text("\n".join(json.dumps(r) for r in records))
     print(f"wrote {len(records)} records → {out}")
 
