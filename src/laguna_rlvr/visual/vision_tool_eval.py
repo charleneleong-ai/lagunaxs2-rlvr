@@ -39,6 +39,18 @@ _TOOLS = [Tool("ocr", "image_id", "returns the text an OCR encoder extracts from
           Tool("answer", "value", "submit your final answer — just the value")]
 
 
+def episode_prompt(image_id: str, question: str, fmt: str) -> str:
+    """Turn-0 prompt: the image is spliced (encoder channel) and the tools are offered. Shared with the
+    SFT trace synthesizer so warm-start and eval present the model the EXACT same prompt."""
+    return (f"You can SEE the image (id: {image_id}) below. You may also call ocr on that id to read "
+            f"its text, then answer.\n{IMAGE_TOKEN}\n\nTask: {question}\n\n{render_instructions(_TOOLS, fmt)}")
+
+
+def ocr_observation(image_id: str, transcript: str) -> str:
+    """The user turn injected after an ocr call — shared with the SFT synthesizer for train/eval parity."""
+    return f"[ocr of {image_id}]\n{transcript}\n\nNow answer, or call a tool."
+
+
 def _interpret(reply: str, fmt: str, gold: str, transcript: str) -> tuple[str, object]:
     """Pure loop step: map a model reply to ('done', solved_bool) if it answered, else ('continue',
     observation_text) — an ocr result or a re-prompt. Adapter-free, so the loop control is unit-tested
@@ -47,7 +59,7 @@ def _interpret(reply: str, fmt: str, gold: str, transcript: str) -> tuple[str, o
     if call and call[0] == "answer":
         return "done", _match(gold, call[1])
     if call and call[0] == "ocr":
-        return "continue", f"[ocr of {call[1]}]\n{transcript}\n\nNow answer, or call a tool."
+        return "continue", ocr_observation(call[1], transcript)
     # An SFT adapter emits a free-form answer, not a tool call — credit it when the reply already carries
     # the gold (the agentic encoder_tool shouldn't require tool-call syntax the model was never taught;
     # RLVR can tighten the discipline). Only a *correct* free-form reply ends the episode; else re-prompt.
@@ -63,11 +75,8 @@ def run_episode(adapter: VisualAdapter, image, image_id: str, question: str, tra
     question + tool instructions; each later turn appends the tool observation. Mirrors `VisualAdapter.chat`'s
     context accumulation, but the next turn is decided by parsing the model's reply (`_interpret`), not given.
     Caller disables gradient checkpointing once around the whole run (see run_probe) — generation only."""
-    instr = render_instructions(_TOOLS, fmt)
-    prompt = (f"You can SEE the image (id: {image_id}) below. You may also call ocr on that id to read "
-              f"its text, then answer.\n{IMAGE_TOKEN}\n\nTask: {question}\n\n{instr}")
     vis = adapter._project([image])[0:1]  # (1, Nv, D) — the encoder channel
-    ctx = adapter._embed_multi(prompt, [vis])
+    ctx = adapter._embed_multi(episode_prompt(image_id, question, fmt), [vis])
     emb = adapter.llm.get_input_embeddings()
     first_reply = ""
     for turn in range(1, max_turns + 1):
