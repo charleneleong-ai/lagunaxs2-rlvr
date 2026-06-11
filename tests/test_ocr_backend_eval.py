@@ -1,5 +1,8 @@
+import json
+
 import pytest
 
+import laguna_rlvr.visual.ocr_backend_eval as obe
 from laguna_rlvr.visual.ocr_backend_eval import cer, coverage_matrix, wer
 
 
@@ -45,3 +48,18 @@ class TestCoverage:
         glued = coverage_matrix([{"corpus": "dvqa", "gold": "2", "transcript": "20000 30000 values"}])
         clean = coverage_matrix([{"corpus": "dvqa", "gold": "2", "transcript": "the bar shows 2 units"}])
         assert glued["overall"] == 0.0 and clean["overall"] == 1.0
+
+
+class TestBuildDocs:
+    def test_pack_serves_backend_transcript(self, tmp_path, monkeypatch):
+        # build-docs wires the chosen backend's transcript into the loop's docs pack: `text` is the
+        # backend transcript (the seam the loop's ocr() serves), q/gold come from the corpus item.
+        monkeypatch.setattr(obe, "_ensure", lambda *a, **k: [
+            {"corpus": "docvqa", "gold": "42.50", "transcript": "Total Due 42.50 (qwen)"}])
+        monkeypatch.setattr(obe, "load_items",
+                            lambda names, n: [("docvqa", None, "what is the total?", "42.50")])
+        out = tmp_path / "pack.jsonl"
+        obe.build_docs(backend="qwen3_vl", n=1, out=str(out), device="cpu")
+        [row] = [json.loads(line) for line in out.read_text().splitlines()]
+        assert row == {"cat": "docvqa", "id": "docvqa_0.png", "text": "Total Due 42.50 (qwen)",
+                       "q": "what is the total?", "a": "42.50"}

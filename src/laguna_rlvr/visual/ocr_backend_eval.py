@@ -168,5 +168,28 @@ def bakeoff(
     print(f"\nwrote {out_path}", flush=True)
 
 
+@app.command("build-docs")
+def build_docs(
+    backend: str = typer.Option("qwen3_vl", help=f"OCR backend whose transcript feeds the loop: {list(BACKENDS)}"),
+    n: int = typer.Option(40, help="items per corpus"),
+    out: str = typer.Option("results/ocr_backend/loop_docs.jsonl", help="docs pack for conf/env/ocr_tool_real"),
+    device: str = typer.Option("cuda"),
+) -> None:
+    """Emit the agentic loop's {cat,id,text,q,a} docs pack with `backend`'s transcript as `text`, so the
+    loop's ocr() serves exactly the transcripts this bake-off scored. Reuses the per-backend glyph cache
+    (no GPU when it exists), zipping it with each item's question/gold. Default `qwen3_vl` — the verdict
+    backend (beats GLM-OCR on WER + coverage; see docs/experiments/agentic-ocr-tool/ocr_backend_wer.md)."""
+    rows = _ensure(backend, "glyph", n, device)   # {corpus, gold, transcript}, aligned to load_items(glyph)
+    items = load_items(_glyph_corpora(), n)
+    assert len(rows) == len(items), f"{len(rows)} cache rows vs {len(items)} items"
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w") as f:
+        for i, (r, (corpus, _img, q, gold)) in enumerate(zip(rows, items)):
+            f.write(json.dumps({"cat": corpus, "id": f"{corpus}_{i}.png",
+                                "text": r["transcript"], "q": q, "a": str(gold)}) + "\n")
+    print(f"[build-docs] {backend}: wrote {len(items)} docs -> {out_path}", flush=True)
+
+
 if __name__ == "__main__":
     app()
