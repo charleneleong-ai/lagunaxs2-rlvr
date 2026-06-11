@@ -17,9 +17,14 @@ class TestMatch:
         ("42.50", "42.50"), ("42.50", "$42.50"), ("42.50", "42.5"),        # currency + float-eq
         ("1234", "****1234"), ("jane@clinic.org", "the email is jane@clinic.org"),  # substring
         ("MX-88231", "mx-88231"),                                          # case-insensitive
+        ("Soil.", "soil"), ("Land.", "Land"),                             # terse VQA golds: trailing period
     ])
     def test_accepts(self, gold, guess):
         assert ocr_tool._match(gold, guess)
+
+    def test_internal_dot_survives_punctuation_strip(self):
+        # the float gold "42.50" must NOT lose its dot to the surrounding-punctuation strip
+        assert ocr_tool._norm("42.50") == "42.50"
 
     @pytest.mark.parametrize("gold,guess", [
         ("42.50", "38.00"), ("1234", "5678"), ("jane@clinic.org", "bob@clinic.org"), ("MX-88231", ""),
@@ -48,7 +53,16 @@ class TestEnv:
             # The answer must NOT be readable from the prompt — it lives only in the OCR-able doc.
             assert ocr_tool._norm(row["info"]["answer"]) not in ocr_tool._norm(row["question"])
             assert row["info"]["text"], "doc text needed for the ocr tool"
+            # The image_id MUST be surfaced — else the model has no handle to call ocr() with.
+            assert row["info"]["image_id"] in row["question"]
         assert len({r["info"]["fmt"] for r in rows}) >= 2, "'mixed' must vary the scaffold across rows"
+
+    def test_spans_the_glyph_subset_categories(self):
+        # The baseline must cover the glyph tasks where the adapter hit the wall, not just toy invoices.
+        cats = {d["cat"] for d in ocr_tool._BUILTIN_DOCS}
+        assert cats == {"docvqa", "ocrvqa", "infographic", "visualmrc", "chart"}
+        rows = ocr_tool.load_environment(scaffold="line").eval_dataset.to_list()
+        assert all(r["info"]["category"] in cats for r in rows)
 
     @pytest.mark.parametrize("fmt", ["line", "xml", "json", "poolside"])
     def test_ocr_then_answer_solves_in_each_scaffold(self, fmt):
@@ -91,3 +105,14 @@ class TestEnv:
         asyncio.run(env.setup_state(state))
         obs = asyncio.run(env.env_response([{"role": "assistant", "content": "hmm let me think"}], state))
         assert not state["done"] and "tool" in obs[0]["content"].lower()
+
+    def test_docs_path_pack_replaces_builtin_and_serves_its_transcript(self, tmp_path):
+        # The real-OCR loop feeds a {cat,id,text,q,a} pack whose `text` is the noisy GLM-OCR transcript;
+        # ocr() must serve that transcript verbatim (noise and all), not the builtin perfect text.
+        pack = tmp_path / "loop_docs.jsonl"
+        pack.write_text('{"cat": "docvqa", "id": "d_0.png", "text": "Total Due 42.50 (noisy)",'
+                        ' "q": "what is the total?", "a": "42.50"}\n')
+        env = ocr_tool.load_environment(scaffold="native", docs_path=str(pack))
+        rows = env.eval_dataset.to_list()
+        assert len(rows) == 1 and rows[0]["info"]["category"] == "docvqa"
+        assert rows[0]["info"]["text"] == "Total Due 42.50 (noisy)"

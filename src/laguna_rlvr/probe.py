@@ -32,15 +32,24 @@ def build_eval_command(env: str, model: str, provider: str, num_examples: int,
     return cmd
 
 
+def _pick(r: dict, key: str):
+    """Read a rollout field, tolerating verifiers' `_`-prefixed rubric-metric keys and the metrics dict."""
+    metrics = r.get("metrics") or {}
+    for k in (key, f"_{key}"):
+        if k in r:
+            return r[k]
+    return metrics.get(key, metrics.get(f"_{key}"))
+
+
 def normalize_records(raw: list[dict], success_key: str, reward_key: str) -> list[dict]:
     """Project raw eval rollouts onto the {success, reward} schema the report consumes."""
-    return [{"success": bool(r[success_key]), "reward": float(r[reward_key])} for r in raw]
+    return [{"success": bool(_pick(r, success_key)), "reward": float(_pick(r, reward_key))} for r in raw]
 
 
 def _load_raw_results(output_dir: Path) -> list[dict]:
-    files = sorted(output_dir.rglob("*.jsonl"))
+    files = sorted(output_dir.rglob("results.jsonl"), key=lambda p: p.stat().st_mtime)
     if not files:
-        raise FileNotFoundError(f"no eval results under {output_dir}")
+        raise FileNotFoundError(f"no results.jsonl under {output_dir}")
     return [json.loads(line) for line in files[-1].read_text().splitlines() if line.strip()]
 
 
@@ -48,7 +57,9 @@ def _load_raw_results(output_dir: Path) -> list[dict]:
 def main(cfg: DictConfig) -> None:
     probe_dir = Path(cfg.paths.results) / "probe"
     probe_dir.mkdir(parents=True, exist_ok=True)
-    raw_dir = probe_dir / f"_raw_{cfg.env.module}__{cfg.model.slug}"
+    # `tag` disambiguates output paths when two confs share one env module (e.g. ocr_tool mock vs real).
+    tag = cfg.env.get("tag", cfg.env.module)
+    raw_dir = probe_dir / f"_raw_{tag}__{cfg.model.slug}"
 
     env_args = {**OmegaConf.to_container(cfg.env.args, resolve=True),
                 **OmegaConf.to_container(cfg.reward, resolve=True)}  # reward group flows into the env
@@ -60,7 +71,7 @@ def main(cfg: DictConfig) -> None:
     subprocess.run(cmd, check=True)
 
     records = normalize_records(_load_raw_results(raw_dir), cfg.probe.success_key, cfg.probe.reward_key)
-    out = probe_dir / f"{cfg.env.module}__{cfg.model.slug}.jsonl"
+    out = probe_dir / f"{tag}__{cfg.model.slug}.jsonl"
     out.write_text("\n".join(json.dumps(r) for r in records))
     print(f"wrote {len(records)} records → {out}")
 
