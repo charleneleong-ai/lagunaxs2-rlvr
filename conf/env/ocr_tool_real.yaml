@@ -1,11 +1,12 @@
 # End-to-end agentic OCR loop on REAL extraction noise: same loop as ocr_tool.yaml, but the ocr() tool
-# returns the cached GLM-OCR transcript of a real corpus image (not perfect mock text), and the question/
-# gold are the real corpus VQA pair. Built by `tool_eval build-docs`. This is the realistic RLVR setting —
-# the mock loop saturates at 100%, so the learnable signal lives in whatever the loop loses to OCR noise.
+# returns the cached transcript of a real corpus image (not perfect mock text), and the question/gold are
+# the real corpus VQA pair. Pack built by `ocr_backend_eval build-docs` with the Qwen3-VL backend (the
+# verdict backend — beats GLM-OCR on WER + coverage, ocr_backend_wer.md). This is the realistic RLVR
+# setting — the mock loop saturates at 100%, so the learnable signal lives in whatever it loses to OCR noise.
 module: ocr_tool
 tag: ocr_tool_real   # distinct output paths from the mock ocr_tool baseline (same env module)
 args:
   max_turns: 4
   scaffold: native
-  docs_path: results/tool_eval/loop_docs.jsonl
+  docs_path: results/ocr_backend/loop_docs.jsonl
   # efficiency_weight is merged in from the reward config group by probe.py

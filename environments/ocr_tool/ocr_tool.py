@@ -180,8 +180,8 @@ class OCRToolEnv(vf.MultiTurnEnv):
 def load_environment(max_turns: int = 4, efficiency_weight: float = 0.1,
                      scaffold: str = "mixed", docs_path: str = "", **kwargs) -> vf.Environment:
     """scaffold: 'line'|'xml'|'json'|'poolside' (text syntax) · 'mixed' (round-robin) · 'native' (structured tool_calls).
-    docs_path: a {cat,id,text,q,a} JSONL pack (real corpus questions + noisy GLM-OCR transcripts as `text`,
-    built by `tool_eval build-docs`) — the end-to-end real-OCR loop. Empty = the mock perfect-text builtin docs."""
+    docs_path: a {cat,id,text,q,a} JSONL pack (real corpus questions + noisy OCR transcripts as `text`,
+    built by `ocr_backend_eval build-docs`) — the end-to-end real-OCR loop. Empty = the mock perfect-text builtin docs."""
     if docs_path:
         docs = [json.loads(line) for line in Path(docs_path).read_text().splitlines() if line.strip()]
     else:

@@ -241,32 +241,5 @@ def rescore(
               f"(exact-match 0.00, n={len(scores)})", flush=True)
 
 
-@app.command("build-docs")
-def build_docs(
-    keep: str = typer.Option(GLYPH_VQA, help="corpora to keep in the pack (OCR-answerable glyph tasks)"),
-    n: int = typer.Option(40, help="items per corpus"),
-    out: str = typer.Option("results/tool_eval/loop_docs.jsonl", help="docs-pack path"),
-) -> None:
-    """Emit a {cat,id,text,q,a} docs pack for the agentic loop: real corpus questions/golds with the
-    cached (noisy) GLM-OCR transcript as `text`. Reuses the full-suite transcript cache (no GPU) and
-    keeps only the glyph corpora the tool can answer, so the loop runs end-to-end on real OCR noise."""
-    full = [s for s in DEFAULT_VQA.split(",") if s]
-    transcripts = _ensure_transcripts(full, n, _transcript_path(full, n))
-    items = load_items(full, n)
-    assert len(transcripts) == len(items), f"{len(transcripts)} transcripts vs {len(items)} items"
-    keep_set = {s for s in keep.split(",") if s}
-    out_path = Path(out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    kept = 0
-    with out_path.open("w") as f:
-        for i, (t, (corpus, _img, q, gold)) in enumerate(zip(transcripts, items)):
-            if corpus not in keep_set:
-                continue
-            f.write(json.dumps({"cat": corpus, "id": f"{corpus}_{i}.png",
-                                "text": t, "q": q, "a": str(gold)}) + "\n")
-            kept += 1
-    print(f"[build-docs] kept {kept}/{len(items)} docs ({sorted(keep_set)}) -> {out_path}", flush=True)
-
-
 if __name__ == "__main__":
     app()

@@ -28,18 +28,17 @@ app = typer.Typer(add_completion=False)
 
 
 @torch.no_grad()
-def glm_ocr_transcribe(items: list, device: str = "cuda", max_new_tokens: int = 48,
-                       model=None, proc=None) -> list[str]:
-    """GLM-OCR reads each item's image (image -> OCR text). One transcript per item, in order.
+def vlm_transcribe(items: list, repo: str, device: str = "cuda", max_new_tokens: int = 48,
+                   model=None, proc=None) -> list[str]:
+    """Any image-text-to-text VLM reads each item's image (image -> OCR text), one transcript per item.
 
-    GLM-OCR is an image-text-to-text model: it's prompted with the image *plus* an instruction (via
-    the chat template), so the full `AutoProcessor` is required, not a bare image processor. Only the
-    generated continuation is decoded (the echoed prompt tokens are sliced off). Loads the model once
-    when `model`/`proc` are omitted, so one call with the full item list is the cheap path (the
-    staged-GPU harness frees it before loading Laguna). `items` are (image, ...) tuples; only `it[0]`.
+    The backend is the HF `repo` (GLM-OCR, Qwen3-VL, …) — all share the same path: the image *plus* an
+    OCR instruction through the chat template (full `AutoProcessor`, not a bare image processor), and only
+    the generated continuation is decoded (echoed prompt tokens sliced off). Loads the model once when
+    `model`/`proc` are omitted, so one call with the full item list is the cheap path (the staged-GPU
+    harness frees it before loading Laguna). `items` are (image, ...) tuples; only `it[0]` is read.
     """
     if model is None:
-        repo = _REPOS["glm_ocr"]
         model = AutoModelForImageTextToText.from_pretrained(repo, device_map=device).eval()
         proc = AutoProcessor.from_pretrained(repo)
     out = []
@@ -52,6 +51,12 @@ def glm_ocr_transcribe(items: list, device: str = "cuda", max_new_tokens: int = 
         new = gen[:, batch["input_ids"].shape[1]:]  # drop the echoed prompt; keep the transcript
         out.append(proc.batch_decode(new, skip_special_tokens=True)[0])
     return out
+
+
+def glm_ocr_transcribe(items: list, device: str = "cuda", max_new_tokens: int = 48,
+                       model=None, proc=None) -> list[str]:
+    """GLM-OCR backend of `vlm_transcribe` — the default OCR encoder for the staged-GPU baselines."""
+    return vlm_transcribe(items, _REPOS["glm_ocr"], device, max_new_tokens, model, proc)
 
 
 def assemble_prompt(task: str, transcript: str | None) -> str:
