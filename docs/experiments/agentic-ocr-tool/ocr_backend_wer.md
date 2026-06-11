@@ -74,8 +74,43 @@ is the obvious next lever on docvqa/visualmrc (analogous to the caption-decoding
 WER reference is clean rendered text (easier than the dense VQA images), so 3–5% is a fidelity floor on the
 easy regime, not on the dense corpora the loop actually struggles with.
 
+## Loop validation — wiring Qwen3-VL in
+
+The bake-off measures the transcript decoder-free; the test is whether a better transcript moves the *loop*.
+Rebuilt the docs pack on Qwen3-VL (`ocr_backend_eval build-docs --backend qwen3_vl`) and re-ran the real-OCR
+loop ([[real_ocr_loop]]) item-for-item — same 7 corpora × 40 × 2 rollouts, remote laguna-m.1.
+
+| corpus | GLM loop | Qwen loop | Δ |
+|---|---|---|---|
+| textvqa | 0.60 | 0.61 | +0.01 |
+| ocrvqa | 0.51 | 0.53 | +0.02 |
+| chartqa | 0.31 | 0.31 | +0.00 |
+| **docvqa** | 0.11 | **0.24** | **+0.13** |
+| **dvqa** | 0.21 | **0.09** | **−0.12** |
+| infographic_vqa | 0.17 | 0.12 | −0.05 |
+| visualmrc | 0.04 | 0.04 | −0.00 |
+| **overall** | **0.28** | **0.28** | **−0.00** |
+
+**The predicted extraction-bound lift landed — and only there.** docvqa, the one corpus the bake-off flagged
+as extraction-bound (coverage 0.12 → 0.35), moves in the loop by the predicted direction and rough magnitude:
+**0.11 → 0.24 (+0.13)**. The coverage proxy correctly predicted the corpus that would move.
+
+**But overall is flat (0.28), because dvqa regresses −0.12.** On dvqa the answer is a chart *value* absent from
+**both** transcripts (bake-off coverage 0/0) — loop success there is the decoder guessing from the chart labels
+the transcript *does* carry, and Qwen's differently-worded transcript shifts those guesses the wrong way. It is
+not a length effect (dvqa transcripts: GLM 13.9 vs Qwen 12.7 mean words). At 40 items/corpus the per-corpus
+deltas are suggestive, not definitive, but the direction is clean: **a better transcriber helps where the answer
+is textual (docvqa) and can mildly hurt where it isn't (dvqa).**
+
+The lesson sharpens the bake-off itself: coverage/WER predicted the corpus that moved (docvqa) but was **blind
+to the one that regressed** (dvqa, coverage 0/0 for both — the proxy can't see a transcript actively misleading
+on an answer it never contained). A backend can only be fully judged **in-loop**, not by coverage alone.
+
 ## Next
 
-RLVR runs on the **Qwen3-VL** transcript backend. The remaining headroom is per-item trust (when to re-read
-vs defer) plus two levers this run surfaced but didn't pull: a **longer transcription budget** for dense
-documents, and the **encoder channel** for chart-value questions the tool structurally can't answer.
+Keep **Qwen3-VL** as the RLVR backend: it strictly wins extraction fidelity (WER) and the one extraction-bound
+loop corpus (docvqa) at no overall cost. But the flat overall is the real signal — the backend swap is
+**necessary, not sufficient**. The floored/regressing corpora (dvqa, visualmrc, infographic) need the two levers
+this run isolated but didn't pull: the **encoder channel** for non-textual answers (chart values) the tool
+structurally can't carry, and **per-item trust** — rely on the transcript when it's authoritative (docvqa),
+ignore it when the answer isn't in it (dvqa). That trust signal is exactly what RLVR can shape.
