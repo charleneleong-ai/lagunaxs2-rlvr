@@ -17,6 +17,7 @@ shape `report.py` ranks, so it folds into the same probe -> rank -> train pipeli
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -26,9 +27,11 @@ from laguna_rlvr.rewards import RolloutState, binary, shaped
 from laguna_rlvr.scaffold import FORMATS, Tool, parse_call, render_instructions
 from laguna_rlvr.visual.model import IMAGE_TOKEN, VisualAdapter
 from laguna_rlvr.visual.multiturn_qa import _match
-from laguna_rlvr.visual.ocr_backend_eval import _ensure, _glyph_corpora
+from laguna_rlvr.visual.ocr_backend_eval import _csv, _ensure, _glyph_corpora
 from laguna_rlvr.visual.encoders import load_encoder
-from laguna_rlvr.visual.tool_eval import load_items
+from laguna_rlvr.visual.tool_eval import DEFAULT_VQA, load_items
+
+_NO_OCR = "(no OCR text extracted from this image — read it from the picture)"
 
 # Same two-tool pool as ocr_tool, so the only axis vs that env is the added vision channel (the image
 # is spliced) — the model can read glyphs off the pixels OR call ocr for the transcript, then answer.
@@ -80,23 +83,38 @@ def _load_adapter(ckpt: str, base: str) -> VisualAdapter:
     return adapter
 
 
-def run_probe(ckpt: str, n: int, *, fmt: str, max_turns: int, base: str, eff_w: float,
-              slug: str, out: Path) -> dict[str, float]:
-    """Drive the vision tool-loop over the glyph corpora and write portfolio records. Reuses the bake-off's
-    cached Qwen3-VL glyph transcripts as the ocr() backend (the verdict backend) + the real images."""
-    glyph = _glyph_corpora()
-    items = load_items(glyph, n)
-    rows = _ensure("qwen3_vl", "glyph", n, "cuda")  # {corpus, gold, transcript}, aligned to load_items(glyph)
-    assert len(rows) == len(items), f"{len(rows)} transcripts vs {len(items)} items"
+def _glyph_transcripts(n: int) -> dict[tuple[str, int], str]:
+    """Qwen3-VL glyph transcripts keyed by (corpus, within-corpus index). A full-matrix run looks up the
+    OCR text for glyph corpora and falls back to a no-text marker on non-glyph (chart/general) images —
+    where there's nothing to transcribe and the encoder channel carries the signal instead."""
+    by_key: dict[tuple[str, int], str] = {}
+    seen: dict[str, int] = defaultdict(int)
+    for r in _ensure("qwen3_vl", "glyph", n, "cuda"):  # {corpus, gold, transcript}
+        c = r["corpus"]
+        by_key[(c, seen[c])] = r["transcript"]
+        seen[c] += 1
+    return by_key
+
+
+def run_probe(ckpt: str, n: int, *, vqa_names: list[str], fmt: str, max_turns: int, base: str,
+              eff_w: float, slug: str, out: Path) -> dict[str, float]:
+    """Drive the vision tool-loop over `vqa_names` and write portfolio records. The image is always spliced
+    (encoder channel); the ocr() tool serves the bake-off's cached Qwen3-VL transcript on glyph corpora,
+    a no-text marker elsewhere — so the full 12-task matrix exercises encoder+tool where text helps and
+    encoder-alone where it doesn't (charts/general)."""
+    items = load_items(vqa_names, n)
+    transcripts = _glyph_transcripts(n)
     adapter = _load_adapter(ckpt, base)
     adapter.llm.gradient_checkpointing_disable()  # generation only — toggle once around the whole run
     out.parent.mkdir(parents=True, exist_ok=True)
     hits: dict[str, list[int]] = {}
+    seen: dict[str, int] = defaultdict(int)
     try:
         with out.open("w") as f:
-            for (corpus, img, q, gold), r in zip(items, rows):
-                assert corpus == r["corpus"], f"misaligned: {corpus} vs {r['corpus']}"
-                solved, turns = run_episode(adapter, img, f"{corpus}.png", q, r["transcript"], str(gold),
+            for corpus, img, q, gold in items:
+                tr = transcripts.get((corpus, seen[corpus]), _NO_OCR)
+                seen[corpus] += 1
+                solved, turns = run_episode(adapter, img, f"{corpus}.png", q, tr, str(gold),
                                             fmt=fmt, max_turns=max_turns)
                 rs = RolloutState(tests_passed=int(solved), tests_total=1, turns=turns,
                                   max_turns=max_turns, succeeded=solved)
@@ -114,10 +132,16 @@ def run_probe(ckpt: str, n: int, *, fmt: str, max_turns: int, base: str, eff_w: 
 app = typer.Typer(add_completion=False, help=__doc__)
 
 
+@app.callback()
+def _main() -> None:
+    """Group callback so `probe` stays an explicit subcommand (Typer collapses single-command apps)."""
+
+
 @app.command()
 def probe(
     ckpt: str = typer.Argument(..., help="trained glm_ocr adapter checkpoint (encoder_tool's decoder)"),
-    n: int = typer.Option(40, help="items per glyph corpus"),
+    n: int = typer.Option(40, help="items per corpus"),
+    vqa: str = typer.Option("glyph", help="'glyph' (7 OCR-answerable), 'all' (the 12-task matrix), or a comma list"),
     fmt: str = typer.Option("poolside", help=f"text tool-call scaffold the local adapter emits: {list(FORMATS)}"),
     max_turns: int = typer.Option(4),
     base: str = typer.Option("poolside/Laguna-XS.2"),
@@ -128,9 +152,10 @@ def probe(
     """Probe the encoder+decoder+tool loop on the local adapter; writes a portfolio-ranked record."""
     if fmt not in FORMATS:
         raise typer.BadParameter(f"local adapter emits text, so fmt must be one of {list(FORMATS)} (not native)")
+    vqa_names = _glyph_corpora() if vqa == "glyph" else (_csv(DEFAULT_VQA) if vqa == "all" else _csv(vqa))
     out_path = Path(out) if out else Path(f"results/probe/vision_tool__{slug}.jsonl")
-    per_corpus = run_probe(ckpt, n, fmt=fmt, max_turns=max_turns, base=base, eff_w=eff_w,
-                           slug=slug, out=out_path)
+    per_corpus = run_probe(ckpt, n, vqa_names=vqa_names, fmt=fmt, max_turns=max_turns, base=base,
+                           eff_w=eff_w, slug=slug, out=out_path)
     overall = sum(per_corpus.values()) / max(len(per_corpus), 1)
     print(f"\n[vision_tool] overall {overall:.2f} | " +
           " ".join(f"{c} {v:.2f}" for c, v in sorted(per_corpus.items())), flush=True)
