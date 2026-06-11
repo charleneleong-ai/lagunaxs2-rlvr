@@ -268,15 +268,21 @@ class VisualAdapter(nn.Module):
         ratio = vis.flatten(0, 1).float().norm(dim=-1).mean() / self._emb_norm_median
         return self.norm_penalty * (ratio - 1.0).clamp(min=0) ** 2
 
-    def _project(self, images: list, anchor: bool | None = None) -> torch.Tensor:
+    def _project(self, images: list, anchor: bool | None = None,
+                 feats: torch.Tensor | None = None) -> torch.Tensor:
         # Encode + resample each image individually, then stack the fixed-size (Nv, D) outputs. NaFlex
         # emits a variable patch count per image, so raw encoder features can't be stacked into one batch
         # pre-resampler (crashes on the heterogeneous Stage-2 mix via transcribe/_log_predictions). The
         # resampler folds N -> fixed Nv, so the per-image outputs ARE uniform and stack cleanly. AnyRes
         # (fixed N) works identically; _project runs at micro_batch=1 in training, batched only at eval.
-        dev, dt = self.llm.device, self.llm.dtype
-        vis = torch.cat([self.projector(self.encoder.encode([img]).to(device=dev, dtype=dt))
-                         for img in images], dim=0)  # (B, Nv, D)
+        # `feats` lets a caller reuse cached frozen-encoder output (GSPO micro-chunk: projector recomputed
+        # per chunk over constant feats, no re-encode); None -> encode here per-image as above.
+        if feats is not None:
+            vis = self.projector(feats)  # (B, Nv, D)
+        else:
+            dev, dt = self.llm.device, self.llm.dtype
+            vis = torch.cat([self.projector(self.encoder.encode([img]).to(device=dev, dtype=dt))
+                             for img in images], dim=0)  # (B, Nv, D)
         return self._anchor(vis) if (self.use_anchor if anchor is None else anchor) else vis
 
     @torch.no_grad()
@@ -373,11 +379,15 @@ class VisualAdapter(nn.Module):
         return out
 
     @torch.no_grad()
-    def chat(self, turns: list[Turn], max_new_tokens: int = 48) -> list[str]:
+    def chat(self, turns: list[Turn], max_new_tokens: int = 48, **gen_kwargs) -> list[str]:
         """Multi-turn multimodal QA: generate an assistant reply per turn, conditioned on all prior
         turns + their images. Each turn's `<image>` markers are filled by that turn's images (0..N),
         so vision arrives across turns — the agentic, tool-observation-style use, not a fixed prefix.
+
+        `gen_kwargs` override the default greedy decode (e.g. repetition_penalty, no_repeat_ngram_size)
+        — greedy collapses to token loops on hard reads, so callers can pass anti-repetition decoding.
         """
+        gen = {"do_sample": False, **gen_kwargs}
         self.llm.gradient_checkpointing_disable()  # generation only — no backward to checkpoint for
         try:
             ctx, replies = None, []
@@ -389,7 +399,7 @@ class VisualAdapter(nn.Module):
                 turn_e = self._embed_multi(turn.text, vis_list)
                 ctx = turn_e if ctx is None else torch.cat([ctx, turn_e], dim=1)
                 reply_ids = self.llm.generate(
-                    inputs_embeds=ctx, max_new_tokens=max_new_tokens, do_sample=False)
+                    inputs_embeds=ctx, max_new_tokens=max_new_tokens, **gen)
                 replies.append(self.tok.decode(reply_ids[0], skip_special_tokens=True))
                 ctx = torch.cat([ctx, self.llm.get_input_embeddings()(reply_ids)], dim=1)
             return replies

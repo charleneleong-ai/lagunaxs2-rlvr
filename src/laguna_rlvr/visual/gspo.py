@@ -43,6 +43,14 @@ def read_reward(needle: str, completion: str) -> float:
 REWARDS = {"read": read_reward}  # edit / ground rewards plug in here (edit_eval, grounding.box_iou)
 
 
+def _reduction_denom(mask: torch.Tensor, *, mode: str):
+    """The denominator `_surrogate_loss` reduces over: gspo averages per-sequence (row count), grpo
+    per unmasked token (`mask.sum`). A micro-chunk's loss is rescaled by `chunk/total` of THIS so the
+    summed per-chunk backwards reconstruct the full-group gradient — caller must use the same notion
+    of "denom" the loss does, so it lives here next to `_surrogate_loss` (single source of truth)."""
+    return float(mask.shape[0]) if mode == "gspo" else mask.sum().clamp_min(1.0)
+
+
 def _surrogate_loss(cur_logp: torch.Tensor, old_logp: torch.Tensor, mask: torch.Tensor,
                     adv: torch.Tensor, *, mode: str, clip: float, max_logratio: float) -> torch.Tensor:
     """Clipped policy-gradient loss for one group. The log-ratio is clamped before `exp` so a
@@ -65,10 +73,17 @@ class GSPOTrainer:
 
     def __init__(self, adapter: VisualAdapter, reward_fn=read_reward, *, group_size: int = 8,
                  lr: float = 1e-6, clip: float = 0.2, max_new_tokens: int = 24, temperature: float = 1.0,
-                 mode: str = "gspo", max_grad_norm: float = 1.0, max_logratio: float = 10.0):
+                 mode: str = "gspo", max_grad_norm: float = 1.0, max_logratio: float = 10.0,
+                 micro_group: int | None = None):
         self.a = adapter
         self.reward_fn = reward_fn
         self.G, self.clip, self.max_new_tokens, self.temperature = group_size, clip, max_new_tokens, temperature
+        # micro_group caps how many rollouts hold a grad-forward at once: a larger G gives denser
+        # reward variance (the lever when small-G groups come out all-zero) but G simultaneous
+        # grad-forwards OOM the single 80GB A100 (G=4 already peaks ~76GB). We generate all G at once
+        # (no grad, ~KV-cache only), then chunk the WITH-grad logprob forward + backward into micro
+        # rows, accumulating grads — so G=16 variance fits at G=4 memory. None -> one chunk (unchanged).
+        self.micro = micro_group or group_size
         # stability bounds (the run died at G=2 from an exploding importance ratio -> NaN logits ->
         # `multinomial` device-side assert): clamp the log-ratio before exp() so `s` can't overflow to
         # inf, clip the grad norm so one batch can't take a giant step, and skip non-finite updates.
@@ -81,8 +96,13 @@ class GSPOTrainer:
         self.opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
         self.pad = adapter.tok.pad_token_id or adapter.tok.eos_token_id
 
-    def _prompt_embeds(self, image, question: str) -> torch.Tensor:  # (1, P, D) — vision spliced
-        return self.a._embed_with_vision(f"{IMAGE_TOKEN}\n{question}\nAnswer:", self.a._project([image])[0:1])
+    @torch.no_grad()
+    def _encode(self, image) -> torch.Tensor:  # frozen-encoder features — constant per image
+        return self.a.encoder.encode([image]).to(device=self.a.llm.device, dtype=self.a.llm.dtype)
+
+    def _prompt_embeds(self, question: str, feats: torch.Tensor) -> torch.Tensor:  # (1, P, D) — vision spliced
+        vis = self.a._project([], feats=feats)  # projector(+grad) on cached frozen feats; no re-encode
+        return self.a._embed_with_vision(f"{IMAGE_TOKEN}\n{question}\nAnswer:", vis[0:1])
 
     @torch.no_grad()
     def _sample_group(self, prompt_e: torch.Tensor):
@@ -97,10 +117,12 @@ class GSPOTrainer:
         return seqs, logp.gather(-1, seqs.unsqueeze(-1)).squeeze(-1)  # (G, gen_len)
 
     def _logprobs(self, prompt_e: torch.Tensor, seqs: torch.Tensor) -> torch.Tensor:
-        """Per-token logprob of `seqs` under the CURRENT policy (with grad through projector/LoRA)."""
-        comp_e = self.a.llm.get_input_embeddings()(seqs)  # (G, gen_len, D)
-        inp = torch.cat([prompt_e.expand(self.G, -1, -1), comp_e], dim=1)  # (G, P+gen_len, D)
-        logits = self.a.llm(inputs_embeds=inp).logits  # (G, P+gen_len, V)
+        """Per-token logprob of `seqs` (n rows, n<=G for a micro-chunk) under the CURRENT policy
+        (with grad through projector/LoRA)."""
+        n = seqs.shape[0]
+        comp_e = self.a.llm.get_input_embeddings()(seqs)  # (n, gen_len, D)
+        inp = torch.cat([prompt_e.expand(n, -1, -1), comp_e], dim=1)  # (n, P+gen_len, D)
+        logits = self.a.llm(inputs_embeds=inp).logits  # (n, P+gen_len, V)
         comp_logits = logits[:, prompt_e.shape[1] - 1:-1, :]  # positions predicting the gen tokens
         return torch.log_softmax(comp_logits.float(), dim=-1).gather(-1, seqs.unsqueeze(-1)).squeeze(-1)
 
@@ -110,19 +132,30 @@ class GSPOTrainer:
         tot_loss = tot_rew = 0.0
         self.last_rollouts = []  # (image, question, completions, rewards) — for W&B sample logging
         for image, question, needle in items:
-            prompt_e = self._prompt_embeds(image, question)
-            seqs, old_logp = self._sample_group(prompt_e)  # no grad
+            feats = self._encode(image)  # frozen encoder once per item; projector recomputed per chunk
+            with torch.no_grad():
+                seqs, old_logp = self._sample_group(self._prompt_embeds(question, feats))  # all G, no grad
             texts = [self.a.tok.decode(s, skip_special_tokens=True) for s in seqs]
             rew = torch.tensor([self.reward_fn(needle, t) for t in texts], device=seqs.device)
             self.last_rollouts.append((image, question, texts, [round(x, 3) for x in rew.tolist()]))
-            adv = (rew - rew.mean()) / (rew.std() + 1e-4)  # group-relative advantage (G,)
-            cur_logp = self._logprobs(prompt_e, seqs)  # (G, gen_len) WITH grad
+            adv = (rew - rew.mean()) / (rew.std() + 1e-4)  # group-relative advantage over ALL G (G,)
             mask = (seqs != self.pad).float()
-            loss = _surrogate_loss(cur_logp, old_logp, mask, adv, mode=self.mode,
-                                   clip=self.clip, max_logratio=self.max_logratio) / len(items)
-            if torch.isfinite(loss):  # a non-finite item-loss would poison the accumulated grad
-                loss.backward()
-                tot_loss += loss.item() * len(items)
+            # Chunk the WITH-grad logprob forward over `micro` rows and accumulate: each chunk's loss
+            # is rescaled chunk/total (of _surrogate_loss's reduction denom) so the summed per-chunk
+            # backwards reconstruct the exact full-group gradient. The prompt embeds (trainable
+            # projector on the cached feats) are rebuilt per chunk so each chunk owns an independent
+            # graph — a single shared prompt subgraph can't be backwarded once per chunk (autograd
+            # frees it on the first backward); the frozen encoder is NOT re-run (feats are cached).
+            total = _reduction_denom(mask, mode=self.mode)
+            for s0 in range(0, self.G, self.micro):
+                sl = slice(s0, s0 + self.micro)
+                cur_logp = self._logprobs(self._prompt_embeds(question, feats), seqs[sl])  # WITH grad
+                scale = _reduction_denom(mask[sl], mode=self.mode) / total
+                loss = _surrogate_loss(cur_logp, old_logp[sl], mask[sl], adv[sl], mode=self.mode,
+                                       clip=self.clip, max_logratio=self.max_logratio) * scale / len(items)
+                if torch.isfinite(loss):  # a non-finite chunk-loss would poison the accumulated grad
+                    loss.backward()
+                    tot_loss += loss.item() * len(items)
             tot_rew += rew.mean().item()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.a.trainable_parameters(), self.max_grad_norm)
         if torch.isfinite(grad_norm):
@@ -140,6 +173,8 @@ def main(
     encoder: str = "siglip", base: str = "poolside/Laguna-XS.2", projector: str = "resampler",
     unfreeze: str = "lora", reward: str = "read", mode: str = "gspo",
     steps: int = 1500, group_size: int = 8, batch: int = 2, lr: float = 1e-6,
+    micro_group: int = typer.Option(0, help="rollouts per grad-forward chunk; 0 -> all G at once. "
+                                    "Set < G (e.g. 4) to fit a large G (e.g. 16) on one 80GB GPU."),
     temperature: float = typer.Option(1.0, help="rollout sampling temperature; lower keeps rollouts "
                                       "near the greedy reader so sparse reads still earn reward variance"),
     n_train: int = 512, eval_every: int = 100, seed: int = 0, out: str = "results/visual",
@@ -154,10 +189,16 @@ def main(
     a.load_adapter_state_dict(torch.load(init_ckpt, map_location=a.llm.device))
     print(f"warm-started from {init_ckpt}", flush=True)
 
+    # Mirror SFT's seeded 90/10 split (train.py): RL trains on train_ds, evals on the held-out val_ds.
+    # The old eval (first 40 of the unshuffled full corpus) was corpus-skewed — it read 0.000 while
+    # SFT's random val span read ~0.13, so the "qa_acc flat" verdict was measured on a broken yardstick.
     full = QASFTDataset(load_text_image("mix", n_train), vqa_sources=load_vqa(DEFAULT_VQA, n_train))
-    items = [(full[i][0], full[i][3] or read_question(CORPUS_KIND.get(full[i][2])), full[i][1])
-             for i in range(len(full))]  # (image, question, needle)
-    eval_items = [full[i] for i in range(min(40, len(full)))]
+    n_val = min(max(1, len(full) // 10), 256)
+    train_ds, val_ds = torch.utils.data.random_split(
+        full, [len(full) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
+    items = [(train_ds[i][0], train_ds[i][3] or read_question(CORPUS_KIND.get(train_ds[i][2])), train_ds[i][1])
+             for i in range(len(train_ds))]  # (image, question, needle)
+    eval_items = [val_ds[i] for i in range(min(40, len(val_ds)))]  # held-out, matches SFT's qa_eval_items
     print(f"GSPO over {len(items)} items | reward={reward} mode={mode} G={group_size} batch={batch}", flush=True)
 
     run_name = f"{encoder}__{Path(base).name}__{name_suffix}"
@@ -166,7 +207,7 @@ def main(
                              "lr": lr, "steps": steps, "encoder": encoder, "projector": projector,
                              "unfreeze": unfreeze, "init_ckpt": init_ckpt}) if wandb_tracking else None
     trainer = GSPOTrainer(a, reward_fn=REWARDS[reward], group_size=group_size, lr=lr, mode=mode,
-                          temperature=temperature)
+                          temperature=temperature, micro_group=micro_group or None)
     out_dir = Path(out) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     best = -1.0
