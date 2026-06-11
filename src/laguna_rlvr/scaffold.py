@@ -41,6 +41,21 @@ def resolve_format(index: int, scaffold: str) -> str:
     return scaffold
 
 
+def format_call(name: str, arg: str, value: str, fmt: str) -> str:
+    """Emit a tool call in `fmt` — the production inverse of `parse_call` (round-trips). Used to synthesize
+    golden tool-call traces for SFT. The test oracle `scaffold_emit` stays independent on purpose, so the
+    round-trip test still cross-checks two implementations."""
+    if fmt == "line":
+        return f"{name}: {value}"
+    if fmt == "xml":
+        return f'<tool_call>{{"name": "{name}", "arguments": {{"{arg}": "{value}"}}}}</tool_call>'
+    if fmt == "json":
+        return f'{{"tool": "{name}", "{arg}": "{value}"}}'
+    if fmt == "poolside":
+        return f"<tool_call>{name}\n<arg_key>{arg}</arg_key>\n<arg_value>{value}</arg_value>\n</tool_call>"
+    raise ValueError(f"unknown scaffold format {fmt!r}")
+
+
 def render_instructions(tools: list[Tool], fmt: str) -> str:
     """Describe how to call `tools` in `fmt` — the per-format syntax the policy must produce."""
     catalog = "Available tools:\n" + "\n".join(f"  {t.name}({t.arg}) — {t.description}" for t in tools)
