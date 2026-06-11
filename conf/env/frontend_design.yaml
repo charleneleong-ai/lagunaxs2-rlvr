@@ -1,0 +1,7 @@
+# Screenshot->code design env: a read_design tool returns the spec the OCR encoder reads (model can't
+# see the mockup), then the model emits the HTML/CSS scored by the verifier. Same tool-mediated-perception
+# family as ocr_tool. Runs on the 7 builtin designs; point `source` at a JSONL corpus later.
+module: frontend_design
+args:
+  max_turns: 5
+  # efficiency_weight is merged in from the reward config group by probe.py
