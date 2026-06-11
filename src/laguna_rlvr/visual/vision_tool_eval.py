@@ -110,8 +110,8 @@ def run_probe(ckpt: str, n: int, *, vqa_names: list[str], fmt: str, max_turns: i
     hits: dict[str, list[int]] = {}
     seen: dict[str, int] = defaultdict(int)
     try:
-        with out.open("w") as f:
-            for corpus, img, q, gold in items:
+        with out.open("w", buffering=1) as f:  # line-buffered: each record hits disk as it's written,
+            for corpus, img, q, gold in items:  # so a long detached run's progress is visible live
                 tr = transcripts.get((corpus, seen[corpus]), _NO_OCR)
                 seen[corpus] += 1
                 solved, turns = run_episode(adapter, img, f"{corpus}.png", q, tr, str(gold),
