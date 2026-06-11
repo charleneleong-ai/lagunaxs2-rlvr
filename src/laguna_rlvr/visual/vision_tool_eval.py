@@ -48,12 +48,17 @@ def _interpret(reply: str, fmt: str, gold: str, transcript: str) -> tuple[str, o
         return "done", _match(gold, call[1])
     if call and call[0] == "ocr":
         return "continue", f"[ocr of {call[1]}]\n{transcript}\n\nNow answer, or call a tool."
+    # An SFT adapter emits a free-form answer, not a tool call — credit it when the reply already carries
+    # the gold (the agentic encoder_tool shouldn't require tool-call syntax the model was never taught;
+    # RLVR can tighten the discipline). Only a *correct* free-form reply ends the episode; else re-prompt.
+    if _match(gold, reply):
+        return "done", True
     return "continue", "No valid tool call found.\n" + render_instructions(_TOOLS, fmt)
 
 
 @torch.no_grad()
 def run_episode(adapter: VisualAdapter, image, image_id: str, question: str, transcript: str, gold: str,
-                *, fmt: str = "poolside", max_turns: int = 4, max_new_tokens: int = 24) -> tuple[bool, int]:
+                *, fmt: str = "poolside", max_turns: int = 4, max_new_tokens: int = 24) -> tuple[bool, int, str]:
     """One encoder+decoder+tool episode. Turn 0 splices the image (the encoder channel) alongside the
     question + tool instructions; each later turn appends the tool observation. Mirrors `VisualAdapter.chat`'s
     context accumulation, but the next turn is decided by parsing the model's reply (`_interpret`), not given.
@@ -64,15 +69,19 @@ def run_episode(adapter: VisualAdapter, image, image_id: str, question: str, tra
     vis = adapter._project([image])[0:1]  # (1, Nv, D) — the encoder channel
     ctx = adapter._embed_multi(prompt, [vis])
     emb = adapter.llm.get_input_embeddings()
+    first_reply = ""
     for turn in range(1, max_turns + 1):
-        gen = adapter.llm.generate(inputs_embeds=ctx, max_new_tokens=max_new_tokens, do_sample=False)
+        # repetition_penalty matches the bake-off — without it this adapter degenerates into a repeat loop.
+        gen = adapter.llm.generate(inputs_embeds=ctx, max_new_tokens=max_new_tokens, do_sample=False,
+                                   repetition_penalty=1.3)
         reply = adapter.tok.decode(gen[0], skip_special_tokens=True).strip()
+        first_reply = first_reply or reply
         ctx = torch.cat([ctx, emb(gen)], dim=1)
         kind, payload = _interpret(reply, fmt, gold, transcript)
         if kind == "done":
-            return bool(payload), turn
+            return bool(payload), turn, first_reply
         ctx = torch.cat([ctx, adapter._embed_multi(f"\n{payload}\n", [])], dim=1)
-    return False, max_turns
+    return False, max_turns, first_reply
 
 
 def _load_adapter(ckpt: str, base: str) -> VisualAdapter:
@@ -114,13 +123,13 @@ def run_probe(ckpt: str, n: int, *, vqa_names: list[str], fmt: str, max_turns: i
             for corpus, img, q, gold in items:  # so a long detached run's progress is visible live
                 tr = transcripts.get((corpus, seen[corpus]), _NO_OCR)
                 seen[corpus] += 1
-                solved, turns = run_episode(adapter, img, f"{corpus}.png", q, tr, str(gold),
-                                            fmt=fmt, max_turns=max_turns)
+                solved, turns, reply = run_episode(adapter, img, f"{corpus}.png", q, tr, str(gold),
+                                                   fmt=fmt, max_turns=max_turns)
                 rs = RolloutState(tests_passed=int(solved), tests_total=1, turns=turns,
                                   max_turns=max_turns, succeeded=solved)
                 f.write(json.dumps({"env": "vision_tool", "model": slug, "corpus": corpus,
                                     "success": bool(solved), "reward": shaped(rs, eff_w),
-                                    "_success": binary(rs)}) + "\n")
+                                    "_success": binary(rs), "reply": reply[:120]}) + "\n")
                 cell = hits.setdefault(corpus, [0, 0])
                 cell[0] += int(solved)
                 cell[1] += 1

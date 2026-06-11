@@ -24,6 +24,10 @@ class TestInterpret:
         kind, obs = _interpret(reply, fmt, gold="42.50", transcript="Total Due 42.50")
         assert kind == "continue" and "Total Due 42.50" in obs
 
-    def test_unparseable_reprompts_with_instructions(self):
+    def test_unparseable_wrong_reply_reprompts_with_instructions(self):
         kind, obs = _interpret("hmm let me think about it", "poolside", gold="42.50", transcript="x")
         assert kind == "continue" and "ocr" in obs.lower() and "answer" in obs.lower()
+
+    def test_free_form_correct_answer_is_credited(self):
+        # an SFT adapter emits the answer bare ("nokia"), not a tool call — credit it when it carries the gold
+        assert _interpret("the brand is nokia", "poolside", gold="nokia", transcript="x") == ("done", True)
