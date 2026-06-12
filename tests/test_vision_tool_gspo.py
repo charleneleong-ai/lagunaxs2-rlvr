@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from laguna_rlvr.visual.vision_tool_gspo import _eval_solved, _gen_positions, episode_reward
+from laguna_rlvr.visual.vision_tool_gspo import (DifficultySampler, _eval_solved, _gen_positions,
+                                                 episode_reward)
 
 
 class TestEpisodeReward:
@@ -60,6 +61,37 @@ class TestEvalSolved:
         assert greedy == 0.5  # 1 of 2 items has gold "yes"
         assert sampled == 0.5  # 1 of 2 items has transcript "solve", averaged over k draws each
         assert calls.count(False) == 2 and calls.count(True) == 2 * 3  # 1 greedy + k sampled per item
+
+
+class TestDifficultySampler:
+    """Weights are the Bernoulli variance p*(1-p) of the per-item solve EMA (+floor) — boundary items
+    (p~0.5) outweigh saturated ones (p~0/1), the first observation replaces the optimistic prior outright,
+    and the floor keeps every item drawable."""
+
+    def test_boundary_item_outweighs_saturated(self):
+        s = DifficultySampler(3, floor=0.05)
+        s.update(0, 0.0)   # always-miss -> variance 0
+        s.update(1, 0.5)   # boundary   -> variance 0.25
+        s.update(2, 1.0)   # always-solve -> variance 0
+        w = s.weights().tolist()
+        assert w[1] > w[0] and w[1] > w[2]
+        assert w[0] == pytest.approx(0.05) and w[2] == pytest.approx(0.05)  # floor keeps them nonzero
+
+    def test_first_obs_replaces_prior_then_blends(self):
+        s = DifficultySampler(1, alpha=0.3)
+        s.update(0, 0.0)                       # first obs: replace 0.5 prior outright
+        assert s.p[0] == pytest.approx(0.0)
+        s.update(0, 1.0)                       # second obs: EMA blend
+        assert s.p[0] == pytest.approx(0.3)
+
+    def test_sample_draws_distinct_indices(self):
+        s = DifficultySampler(5)
+        idxs = s.sample(3)
+        assert len(idxs) == len(set(idxs)) == 3
+
+    def test_unseen_items_start_at_max_weight(self):
+        s = DifficultySampler(2, floor=0.05)
+        assert s.weights().tolist() == pytest.approx([0.3, 0.3])  # floor + 0.5*0.5, optimistic
 
 
 class TestGenPositions:

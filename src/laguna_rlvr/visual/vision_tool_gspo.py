@@ -94,6 +94,7 @@ class ToolLoopGSPO:
         self.opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
         self.pad = adapter.tok.pad_token_id or adapter.tok.eos_token_id
         self.last_rollouts: list = []  # (image, question, replies, rewards) for W&B sample logging
+        self.last_solved: list[float] = []  # per-item solve fraction this step — feeds the difficulty sampler
 
     def _trim(self, seq: torch.Tensor) -> torch.Tensor:
         """A batched generate right-pads short samples past their first eos; keep through the first eos
@@ -175,7 +176,7 @@ class ToolLoopGSPO:
     def step(self, items: list) -> dict[str, float]:
         self.opt.zero_grad()
         tot_loss = tot_rew = tot_solved = 0.0
-        self.last_rollouts = []
+        self.last_rollouts, self.last_solved = [], []
         self.a.llm.gradient_checkpointing_disable()  # rollouts are generation-only (no grad to checkpoint)
         for image, image_id, question, transcript, gold in items:
             eps = self._rollout_group(image, image_id, question, transcript, gold)
@@ -197,12 +198,43 @@ class ToolLoopGSPO:
                 loss.backward()
                 tot_loss += loss.item() * len(items)
             tot_rew += rew.mean().item()
-            tot_solved += sum(solved) / self.G  # true solve-rate, not inferred from the shaped reward
+            item_solved = sum(solved) / self.G  # true solve-rate, not inferred from the shaped reward
+            self.last_solved.append(item_solved)
+            tot_solved += item_solved
         grad_norm = torch.nn.utils.clip_grad_norm_(self.a.trainable_parameters(), self.max_grad_norm)
         if torch.isfinite(grad_norm):
             self.opt.step()  # else drop the batch — a non-finite grad would write NaN into the weights
         return {"tlg/loss": tot_loss / len(items), "tlg/reward": tot_rew / len(items),
                 "tlg/solved": tot_solved / len(items), "tlg/grad_norm": float(grad_norm)}
+
+
+class DifficultySampler:
+    """Weighted item sampler that biases batches toward the learnable boundary band — items whose sampled
+    solve-rate sits near 0.5, where the G rollouts split (mixed solve/miss => nonzero within-group spread =>
+    nonzero GSPO advantage). Items that always solve or always miss give zero spread and zero gradient, so
+    GSPO wastes those batches; under uniform sampling at solve-rate ~0.18 almost every batch was saturated
+    (grad_norm 0.00). The weight is the Bernoulli variance p*(1-p) of the per-item solve EMA — exactly the
+    scale of the squared group-relative advantage that item contributes — plus a floor so no item is ever
+    zeroed (it stays explorable, and its estimate stays fresh as the policy drifts). The estimate is online
+    over the rollouts the trainer already runs (no separate probe pass); unseen items start optimistic
+    (p=0.5 => max weight), and the first observation replaces that prior outright so a truly always-miss item
+    drops out of the boundary band immediately instead of lingering at the blended 0.35."""
+
+    def __init__(self, n: int, *, floor: float = 0.05, alpha: float = 0.3):
+        self.p = [0.5] * n  # solve-rate EMA, optimistic init -> every item drawn early
+        self.seen = [False] * n
+        self.floor, self.alpha = floor, alpha
+
+    def weights(self) -> torch.Tensor:
+        return torch.tensor([self.floor + p * (1 - p) for p in self.p])
+
+    def sample(self, batch: int) -> list[int]:
+        return torch.multinomial(self.weights(), min(batch, len(self.p)), replacement=False).tolist()
+
+    def update(self, idx: int, solve_frac: float) -> None:
+        a = self.alpha if self.seen[idx] else 1.0  # first obs replaces the optimistic prior outright
+        self.p[idx] = (1 - a) * self.p[idx] + a * solve_frac
+        self.seen[idx] = True
 
 
 @torch.no_grad()
@@ -246,6 +278,10 @@ def main(
     n_train: int = typer.Option(40, help="items per glyph corpus (40 reuses the cached Qwen3-VL transcripts)"),
     eval_n: int = typer.Option(40, help="held-out items for the greedy solve-rate eval"),
     eval_every: int = typer.Option(50), seed: int = typer.Option(0),
+    difficulty_sampling: bool = typer.Option(True, "--difficulty/--uniform",
+                                             help="bias batches toward the learnable boundary band (items "
+                                             "whose solve-rate splits the G group) instead of uniform — the "
+                                             "fix for saturated all-solve/all-miss batches starving the grad"),
     out: str = typer.Option("results/visual"), name_suffix: str = typer.Option("tool_gspo"),
     wandb_tracking: bool = typer.Option(True, "--wandb/--no-wandb"),
 ) -> None:
@@ -261,7 +297,8 @@ def main(
     eval_items = [all_items[i] for i in sorted(held)][:eval_n]
     items = [it for i, it in enumerate(all_items) if i not in held]  # disjoint train split
     print(f"tool-loop GSPO over {len(items)} train / {len(eval_items)} held-out items | "
-          f"G={group_size} batch={batch} fmt={fmt}", flush=True)
+          f"G={group_size} batch={batch} fmt={fmt} | "
+          f"sampling={'difficulty' if difficulty_sampling else 'uniform'}", flush=True)
 
     run_name = f"glm_ocr__{Path(base).name}__{name_suffix}"
     run = wandb.init(project="laguna-mm-adapter", name=run_name,
@@ -272,9 +309,14 @@ def main(
                            temperature=temperature)
     out_dir = Path(out) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    sampler = DifficultySampler(len(items)) if difficulty_sampling else None
     best = -1.0
     for step in range(1, steps + 1):
-        m = trainer.step(random.sample(items, batch))
+        idxs = sampler.sample(batch) if sampler else random.sample(range(len(items)), batch)
+        m = trainer.step([items[i] for i in idxs])
+        if sampler:
+            for i, sr in zip(idxs, trainer.last_solved, strict=True):  # loud if order/len ever diverge
+                sampler.update(i, sr)
         if run is not None:
             run.log(m, step=step)
         if step % 10 == 0:
