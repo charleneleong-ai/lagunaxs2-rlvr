@@ -1,6 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 
-from laguna_rlvr.visual.vision_tool_gspo import _gen_positions, episode_reward
+from laguna_rlvr.visual.vision_tool_gspo import _eval_solved, _gen_positions, episode_reward
 
 
 class TestEpisodeReward:
@@ -34,6 +36,30 @@ class TestEpisodeReward:
         fast = episode_reward(True, [(None, None)], "a", "a", "", max_turns=4)                         # 1 turn
         slow = episode_reward(True, [(None, "No valid tool call"), (None, None)], "a", "a", "", max_turns=4)  # 2
         assert fast > slow
+
+
+class TestEvalSolved:
+    """(sampled, greedy) split: sampled averages k draws/item under the training decode (do_sample, no
+    rep-penalty — the distribution GSPO optimizes); greedy is one deterministic rep-penalty draw/item."""
+
+    def test_sampled_averages_k_draws_greedy_is_one_per_item(self, monkeypatch):
+        calls = []
+
+        def stub(adapter, image, image_id, question, transcript, gold, *, fmt, max_turns,
+                 do_sample=False, temperature=1.0, top_p=1.0, repetition_penalty=1.3):
+            calls.append(do_sample)
+            solved = (transcript == "solve") if do_sample else (gold == "yes")  # decode-dependent outcome
+            return solved, 1, "r"
+
+        monkeypatch.setattr("laguna_rlvr.visual.vision_tool_gspo.run_episode", stub)
+        items = [("img", "a.png", "q", "solve", "yes"), ("img", "b.png", "q", "miss", "no")]
+        adapter = SimpleNamespace(llm=SimpleNamespace(gradient_checkpointing_disable=lambda: None))
+
+        sampled, greedy = _eval_solved(adapter, items, fmt="poolside", max_turns=4, temperature=0.8, k=3)
+
+        assert greedy == 0.5  # 1 of 2 items has gold "yes"
+        assert sampled == 0.5  # 1 of 2 items has transcript "solve", averaged over k draws each
+        assert calls.count(False) == 2 and calls.count(True) == 2 * 3  # 1 greedy + k sampled per item
 
 
 class TestGenPositions:

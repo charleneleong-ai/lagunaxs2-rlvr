@@ -206,13 +206,25 @@ class ToolLoopGSPO:
 
 
 @torch.no_grad()
-def _eval_solved(adapter: VisualAdapter, items: list, *, fmt: str, max_turns: int) -> float:
-    """Greedy VisionToolEnv solve-rate over `items` — the same agentic metric `vision_tool_eval` probes,
-    so the number is directly comparable to the 0.13 warm-start floor."""
+def _eval_solved(adapter: VisualAdapter, items: list, *, fmt: str, max_turns: int, temperature: float,
+                 k: int = 4) -> tuple[float, float]:
+    """Held-out VisionToolEnv solve-rate, returned as (sampled, greedy).
+
+    `sampled` is the mean solve fraction over `k` draws/item under the *training* decode (do_sample, no
+    repetition_penalty) — the expected-solve quantity GSPO actually maximizes, so it's the primary metric.
+    `greedy` is the bake-off's deterministic + repetition_penalty=1.3 decode — a secondary deploy number,
+    a different distribution the gradient doesn't directly optimize (it's why greedy sat at the warm-start
+    floor while sampled solve climbed)."""
     adapter.llm.gradient_checkpointing_disable()
-    hits = sum(run_episode(adapter, img, iid, q, tr, gold, fmt=fmt, max_turns=max_turns)[0]
-               for img, iid, q, tr, gold in items)
-    return hits / max(len(items), 1)
+    n = max(len(items), 1)
+
+    def solve_rate(draws: int, **decode) -> float:
+        return sum(run_episode(adapter, img, iid, q, tr, gold, fmt=fmt, max_turns=max_turns, **decode)[0]
+                   for img, iid, q, tr, gold in items for _ in range(draws)) / (n * draws)
+
+    greedy = solve_rate(1)  # default decode: deterministic + repetition_penalty=1.3
+    sampled = solve_rate(k, do_sample=True, temperature=temperature, top_p=0.95, repetition_penalty=1.0)
+    return sampled, greedy
 
 
 app = typer.Typer(add_completion=False, help=__doc__)
@@ -244,9 +256,12 @@ def main(
     adapter.train()
     print(f"warm-started from {init_ckpt}", flush=True)
 
-    items = load_tool_items(n_train)
-    eval_items = items[:: max(len(items) // eval_n, 1)][:eval_n]  # stride -> all corpora, not just the first
-    print(f"tool-loop GSPO over {len(items)} items | G={group_size} batch={batch} fmt={fmt}", flush=True)
+    all_items = load_tool_items(n_train)
+    held = set(range(0, len(all_items), max(len(all_items) // eval_n, 1)))  # strided -> spans all corpora
+    eval_items = [all_items[i] for i in sorted(held)][:eval_n]
+    items = [it for i, it in enumerate(all_items) if i not in held]  # disjoint train split
+    print(f"tool-loop GSPO over {len(items)} train / {len(eval_items)} held-out items | "
+          f"G={group_size} batch={batch} fmt={fmt}", flush=True)
 
     run_name = f"glm_ocr__{Path(base).name}__{name_suffix}"
     run = wandb.init(project="laguna-mm-adapter", name=run_name,
@@ -267,11 +282,12 @@ def main(
                   f"solved {m['tlg/solved']:.3f}  grad_norm {m['tlg/grad_norm']:.2f}", flush=True)
         if step % eval_every == 0:
             torch.cuda.empty_cache()
-            acc = _eval_solved(adapter, eval_items, fmt=fmt, max_turns=max_turns)
-            best = max(best, acc)
-            print(f"  [eval] step {step}: solve_rate {acc:.3f}  (best {best:.3f})", flush=True)
+            acc, greedy = _eval_solved(adapter, eval_items, fmt=fmt, max_turns=max_turns, temperature=temperature)
+            best = max(best, acc)  # checkpoint on the sampled solve-rate — the distribution GSPO optimizes
+            print(f"  [eval] step {step}: sampled {acc:.3f}  greedy {greedy:.3f}  (best {best:.3f})", flush=True)
             if run is not None:
-                run.log({"vision_tool/solve_rate": acc, "vision_tool/best": best}, step=step)
+                run.log({"vision_tool/solve_rate": acc, "vision_tool/greedy": greedy,
+                         "vision_tool/best": best}, step=step)
                 if trainer.last_rollouts:
                     tbl = wandb.Table(columns=["image", "question", "rollout", "reward"])
                     for image, question, replies, rews in trainer.last_rollouts:
@@ -280,7 +296,7 @@ def main(
                     run.log({"vision_tool/rollouts": tbl}, step=step)
             if acc >= best:
                 torch.save(adapter.adapter_state_dict(), out_dir / "best.pt")
-    print(f"done. best solve_rate {best:.3f} -> {out_dir}/best.pt", flush=True)
+    print(f"done. best sampled solve_rate {best:.3f} -> {out_dir}/best.pt", flush=True)
     if run is not None:
         run.summary.update({"best_solve_rate": best})
         run.finish()
