@@ -4,8 +4,8 @@ from laguna_rlvr.visual.vision_tool_gspo import _gen_positions, episode_reward
 
 
 class TestEpisodeReward:
-    """The granular reward must give within-group spread — a flat 0/1 makes unanimous groups (zero GSPO
-    advantage -> no gradient), which is the stall this reward fixes."""
+    """Reward is dominated by the discrete solve so optimizing it moves the greedy reader; the small tool /
+    efficiency terms only break ties (zero within-group spread -> zero GSPO advantage -> no gradient)."""
 
     def _done(self, obs=None):
         return [(None, obs), (None, None)] if obs else [(None, None)]
@@ -15,11 +15,13 @@ class TestEpisodeReward:
         near = episode_reward(False, self._done(), "42.50", "42.5", "", max_turns=4)
         assert solved > near >= 0
 
-    def test_closer_miss_scores_higher_than_far_miss(self):
-        # the granularity property: char-similarity separates near from far, where word-jaccard tied them at ~0
-        near = episode_reward(False, self._done(), "soil", "soi", "", max_turns=4)
-        far = episode_reward(False, self._done(), "soil", "zzzz", "", max_turns=4)
-        assert near > far
+    def test_no_miss_outscores_a_solve(self):
+        # the redesign's core invariant: the shaping terms (<=0.1 tool + <=0.05 effic) can never let even a
+        # perfectly-shaped miss out-reward a solve. The earlier char-similarity proxy violated this — a close
+        # miss could out-reward a solve — which is why reward rose while the greedy mode never moved.
+        solve = episode_reward(True, self._done(), "a", "a", "carries a", max_turns=4)        # wrong tool, solved
+        miss = episode_reward(False, self._done("[ocr of x]\na"), "a", "x", "carries a", max_turns=4)  # right tool
+        assert solve > miss
 
     def test_correct_ocr_decision_earns_the_tool_bonus(self):
         # gold IS in the transcript -> calling ocr was the right call -> +0.1 over not calling it

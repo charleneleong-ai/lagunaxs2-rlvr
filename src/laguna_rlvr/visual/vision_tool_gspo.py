@@ -18,7 +18,6 @@ reward is per-episode (sequence-level), which is what GSPO is for; per-token GRP
 from __future__ import annotations
 
 import random
-from difflib import SequenceMatcher
 from pathlib import Path
 
 import torch
@@ -26,7 +25,7 @@ import typer
 import wandb
 
 from laguna_rlvr.visual.model import VisualAdapter
-from laguna_rlvr.visual.multiturn_qa import _match, _norm
+from laguna_rlvr.visual.multiturn_qa import _match
 from laguna_rlvr.visual.ocr_backend_eval import _glyph_corpora
 from laguna_rlvr.visual.tool_eval import load_items
 from laguna_rlvr.visual.vision_tool_eval import (_NO_OCR, _glyph_transcripts, _interpret, _load_adapter,
@@ -38,16 +37,16 @@ _OCR_OBS = "[ocr of "  # ocr_observation()'s prefix — marks turns where the po
 
 def episode_reward(solved: bool, turns: list[Turn], gold: str, final_reply: str, transcript: str,
                    *, max_turns: int) -> float:
-    """Granular per-episode reward — CONTINUOUS so near-tied rollouts in a group still differ. Binary
-    solve makes groups unanimous (all-solve or all-miss) -> zero GSPO advantage -> no gradient (the stall
-    seen at G=6/temp=0.7). Three components, each adding within-group spread on a different axis:
-      answer  — 1.0 on solve, else char-level similarity to gold (smooth partial credit; separates
-                'close' misses from 'far' ones, where word-jaccard collapsed them to ~0)
-      tool    — +0.1 when the ocr-call decision matched need (call ocr iff the transcript carries gold):
-                shapes the trust ratio AND breaks ties when answers agree but tool choice differs
-      effic   — +<=0.05 for solving in fewer turns: breaks ties inside the all-solve group
-    Scale is irrelevant to GSPO (advantage normalizes); the terms exist only to differentiate rollouts."""
-    answer = 1.0 if solved else SequenceMatcher(None, _norm(gold), _norm(final_reply)).ratio()
+    """Per-episode reward, dominated by the DISCRETE solve so optimizing it moves the greedy reader (the
+    earlier char-similarity proxy let reward climb without ever crossing the solve boundary -> greedy eval
+    flat at the 0.125 floor while sampled reward rose). The two shaping terms are each CAUSALLY upstream of
+    solving, so they don't pull off-objective; they exist to give within-group spread on unanimous-miss /
+    unanimous-solve groups (zero spread -> zero GSPO advantage -> no gradient):
+      tool   — +0.1 when the ocr-call decision matched need (call ocr iff the transcript carries gold):
+               correct tool use is a PREREQUISITE for solving the read, and this is the trust-ratio fix
+      effic  — +<=0.05 for solving in fewer turns: breaks ties inside the all-solve group
+    Scale is irrelevant to GSPO (advantage normalizes); the terms only differentiate near-tied rollouts."""
+    answer = 1.0 if solved else 0.0
     called_ocr = any(obs is not None and obs.startswith(_OCR_OBS) for _, obs in turns)
     tool = 0.1 if called_ocr == _match(gold, transcript) else 0.0
     effic = 0.05 * (1 - (len(turns) - 1) / max_turns) if solved else 0.0
@@ -81,11 +80,12 @@ def load_tool_items(n: int) -> list[tuple]:
 
 class ToolLoopGSPO:
     """GSPO over VisionToolEnv episodes: sample G tool-loop trajectories per item, score each with the
-    granular `episode_reward` (so a group's rollouts differ even when none/all solve -> nonzero advantage),
-    and take a clipped sequence-ratio step. Only the projector (+ LoRA) trains; base + encoder stay frozen."""
+    solve-dominated `episode_reward` (small tool/efficiency terms give within-group spread so groups aren't
+    unanimous), and take a clipped sequence-ratio step over the raw-rescored old policy (ratio == 1 at the
+    on-policy step). Only the projector (+ LoRA) trains; base + encoder stay frozen."""
 
-    def __init__(self, adapter: VisualAdapter, *, group_size: int = 6, lr: float = 1e-6, clip: float = 0.2,
-                 fmt: str = "poolside", max_turns: int = 4, max_new_tokens: int = 24, temperature: float = 1.0,
+    def __init__(self, adapter: VisualAdapter, *, group_size: int = 6, lr: float = 3e-6, clip: float = 0.2,
+                 fmt: str = "poolside", max_turns: int = 4, max_new_tokens: int = 24, temperature: float = 0.8,
                  max_grad_norm: float = 1.0, max_logratio: float = 10.0):
         self.a = adapter
         self.G, self.clip, self.fmt = group_size, clip, fmt
@@ -95,36 +95,60 @@ class ToolLoopGSPO:
         self.pad = adapter.tok.pad_token_id or adapter.tok.eos_token_id
         self.last_rollouts: list = []  # (image, question, replies, rewards) for W&B sample logging
 
+    def _trim(self, seq: torch.Tensor) -> torch.Tensor:
+        """A batched generate right-pads short samples past their first eos; keep through the first eos
+        (inclusive). pad may == eos, so match the first pad occurrence — everything after it is padding."""
+        hit = (seq == self.pad).nonzero(as_tuple=True)[0]
+        end = hit[0].item() + 1 if hit.numel() else seq.shape[0]
+        return seq[:end]
+
     @torch.no_grad()
-    def _rollout(self, image, image_id: str, question: str, transcript: str,
-                 gold: str) -> tuple[list[Turn], list[torch.Tensor], float, str, bool]:
-        """One sampled episode. Mirrors `run_episode` but samples (do_sample) and records, per turn, the
-        generated ids + their old-policy logprobs, so the step can recompute the current-policy ratio.
-        No repetition_penalty: the old logprob must come from the SAME distribution the step re-scores."""
+    def _sample(self, ctx: torch.Tensor, n: int) -> list[torch.Tensor]:
+        """n sampled token sequences (generated-only, trimmed) from a shared context. n>1 runs as ONE
+        batched generate (num_return_sequences) — the GPU win on the G-wide turn 0. Logprobs are NOT read
+        from generation: `out.scores` are temperature/top_p-WARPED (top_p sets non-nucleus logits to -inf),
+        so they'd never match `_cur_logp`'s raw re-score -> ratio != 1 even on-policy. The step recomputes
+        old logprobs from raw logits instead (see `_rollout_group`)."""
+        seqs = self.a.llm.generate(inputs_embeds=ctx, num_return_sequences=n, max_new_tokens=self.max_new_tokens,
+                                   do_sample=True, temperature=self.temperature, top_p=0.95, pad_token_id=self.pad)
+        return [self._trim(seqs[i]) for i in range(n)]
+
+    def _step_turn(self, seq: torch.Tensor, ctx: torch.Tensor, turns: list[Turn], gold: str,
+                   transcript: str) -> tuple[torch.Tensor, str, bool, bool]:
+        """Record one generated turn, interpret it, and extend ctx with the reply and — if it called ocr —
+        the injected observation. Returns (ctx, reply, done, solved)."""
+        reply = self.a.tok.decode(seq, skip_special_tokens=True).strip()
+        ctx = torch.cat([ctx, self.a.llm.get_input_embeddings()(seq[None])], dim=1)
+        kind, payload = _interpret(reply, self.fmt, gold, transcript)
+        if kind == "done":
+            turns.append((seq, None))
+            return ctx, reply, True, bool(payload)
+        turns.append((seq, payload))
+        return torch.cat([ctx, self.a._embed_multi(f"\n{payload}\n", [])], dim=1), reply, False, False
+
+    @torch.no_grad()
+    def _rollout_group(self, image, image_id: str, question: str, transcript: str,
+                       gold: str) -> list[tuple[list[Turn], torch.Tensor, float, str, bool]]:
+        """G sampled episodes for one item. Turn 0 shares the prompt across the group, so it's ONE batched
+        generate (num_return_sequences=G) — the bulk of the work, where batch=1 left the GPU at ~27%. Turns
+        1+ diverge (only rollouts that called ocr continue, on their own observation), so they fall back to
+        per-sequence generation. Old-policy logprobs are the RAW re-score of the assembled trajectory (same
+        path as `_cur_logp`, detached here), so the on-policy ratio is exactly 1 at the step."""
         vis = self.a._project([image])[0:1]
-        ctx = self.a._embed_multi(episode_prompt(image_id, question, self.fmt), [vis])
-        emb = self.a.llm.get_input_embeddings()
-        turns: list[Turn] = []
-        old_logps: list[torch.Tensor] = []
-        solved, final_reply = False, ""
-        for _ in range(self.max_turns):
-            out = self.a.llm.generate(inputs_embeds=ctx, max_new_tokens=self.max_new_tokens, do_sample=True,
-                                      temperature=self.temperature, top_p=0.95, pad_token_id=self.pad,
-                                      return_dict_in_generate=True, output_scores=True)
-            seq = out.sequences[0]  # (t,) generated-only — inputs_embeds carry no ids
-            logp = torch.log_softmax(torch.stack(out.scores, dim=1).float(), dim=-1)[0]  # (t, V)
-            old_logps.append(logp.gather(-1, seq[:, None]).squeeze(-1))  # (t,) old-policy logprob
-            final_reply = self.a.tok.decode(seq, skip_special_tokens=True).strip()
-            ctx = torch.cat([ctx, emb(seq[None])], dim=1)
-            kind, payload = _interpret(final_reply, self.fmt, gold, transcript)
-            if kind == "done":
-                turns.append((seq, None))
-                solved = bool(payload)
-                break
-            turns.append((seq, payload))
-            ctx = torch.cat([ctx, self.a._embed_multi(f"\n{payload}\n", [])], dim=1)
-        reward = episode_reward(solved, turns, gold, final_reply, transcript, max_turns=self.max_turns)
-        return turns, old_logps, reward, final_reply, solved
+        base = self.a._embed_multi(episode_prompt(image_id, question, self.fmt), [vis])
+        episodes = []
+        for seq in self._sample(base, self.G):
+            turns: list[Turn] = []
+            ctx, reply, done, solved = self._step_turn(seq, base, turns, gold, transcript)
+            for _ in range(self.max_turns - 1):
+                if done:
+                    break
+                seq, = self._sample(ctx, 1)
+                ctx, reply, done, solved = self._step_turn(seq, ctx, turns, gold, transcript)
+            old = self._cur_logp(image, image_id, question, turns)  # raw old-policy logprob (no grad here)
+            reward = episode_reward(solved, turns, gold, reply, transcript, max_turns=self.max_turns)
+            episodes.append((turns, old, reward, reply, solved))
+        return episodes
 
     def _cur_logp(self, image, image_id: str, question: str, turns: list[Turn]) -> torch.Tensor:
         """Per-token logprob of every generated token under the CURRENT policy (grad through projector +
@@ -154,7 +178,7 @@ class ToolLoopGSPO:
         self.last_rollouts = []
         self.a.llm.gradient_checkpointing_disable()  # rollouts are generation-only (no grad to checkpoint)
         for image, image_id, question, transcript, gold in items:
-            eps = [self._rollout(image, image_id, question, transcript, gold) for _ in range(self.G)]
+            eps = self._rollout_group(image, image_id, question, transcript, gold)
             turns, old_logps, rewards, replies, solved = zip(*eps)
             rew = torch.tensor(rewards, device=self.a.llm.device)
             self.last_rollouts.append((image, question, list(replies),
@@ -164,7 +188,6 @@ class ToolLoopGSPO:
             logr = []
             for ts, old in zip(turns, old_logps):
                 cur = self._cur_logp(image, image_id, question, ts)
-                old = torch.cat(old)
                 logr.append(((cur - old).sum() / max(cur.shape[0], 1)).clamp(-self.max_logratio, self.max_logratio))
             self.a.llm.gradient_checkpointing_disable()
             s = torch.exp(torch.stack(logr))  # (G,) length-normalized sequence ratio
@@ -174,7 +197,7 @@ class ToolLoopGSPO:
                 loss.backward()
                 tot_loss += loss.item() * len(items)
             tot_rew += rew.mean().item()
-            tot_solved += sum(solved) / self.G  # true solve-rate, not inferred from the granular reward
+            tot_solved += sum(solved) / self.G  # true solve-rate, not inferred from the shaped reward
         grad_norm = torch.nn.utils.clip_grad_norm_(self.a.trainable_parameters(), self.max_grad_norm)
         if torch.isfinite(grad_norm):
             self.opt.step()  # else drop the batch — a non-finite grad would write NaN into the weights
@@ -201,7 +224,9 @@ def main(
     base: str = typer.Option("poolside/Laguna-XS.2"),
     fmt: str = typer.Option("poolside", help="tool-call scaffold the loop runs in"),
     steps: int = typer.Option(800), group_size: int = typer.Option(8), batch: int = typer.Option(2),
-    lr: float = typer.Option(1e-6), max_turns: int = typer.Option(4),
+    lr: float = typer.Option(3e-6, help="3e-6 — the prior 1e-6 moved the greedy mode too little over 400 "
+                             "steps; the aligned discrete-solve reward tolerates a larger step"),
+    max_turns: int = typer.Option(4),
     temperature: float = typer.Option(0.8, help="rollout sampling temperature — high enough that the G "
                                       "samples per item DIFFER (mixed solve/miss within a group = nonzero "
                                       "GSPO advantage), low enough to stay near the greedy reader; 1.0 drifts "
