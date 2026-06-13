@@ -175,22 +175,32 @@ class ToolLoopGSPO:
 
     def step(self, items: list) -> dict[str, float]:
         self.opt.zero_grad()
-        tot_loss = tot_rew = tot_solved = 0.0
         self.last_rollouts, self.last_solved = [], []
-        self.a.llm.gradient_checkpointing_disable()  # rollouts are generation-only (no grad to checkpoint)
-        for image, image_id, question, transcript, gold in items:
-            eps = self._rollout_group(image, image_id, question, transcript, gold)
-            turns, old_logps, rewards, replies, solved = zip(*eps)
-            rew = torch.tensor(rewards, device=self.a.llm.device)
+
+        # Pass 1: collect all rollouts (no grad; _rollout_group is @torch.no_grad()).
+        self.a.llm.gradient_checkpointing_disable()
+        all_eps = [self._rollout_group(img, iid, q, tr, gold) for img, iid, q, tr, gold in items]
+
+        # Cross-batch advantage normalization pools all batch*G rewards. This preserves signal when
+        # each per-item G-group is internally unanimous but the batch contains easy and hard items.
+        dev = self.a.llm.device
+        all_rew = torch.tensor([r for eps in all_eps for _, _, r, _, _ in eps], device=dev)
+        batch_mean = all_rew.mean()
+        batch_std = all_rew.std().clamp_min(1e-4)
+
+        # Pass 2: backward with grad; checkpointing remains enabled through every _cur_logp forward.
+        tot_loss = tot_rew = tot_solved = 0.0
+        self.a.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        for (image, image_id, question, transcript, gold), eps in zip(items, all_eps, strict=True):
+            turns_list, old_logps, rewards, replies, solved_flags = zip(*eps)
+            rew = torch.tensor(rewards, device=dev)
             self.last_rollouts.append((image, question, list(replies),
                                        [round(x, 3) for x in rew.tolist()]))
-            adv = (rew - rew.mean()) / (rew.std() + 1e-4)  # group-relative advantage (G,)
-            self.a.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            adv = (rew - batch_mean) / batch_std
             logr = []
-            for ts, old in zip(turns, old_logps):
+            for ts, old in zip(turns_list, old_logps, strict=True):
                 cur = self._cur_logp(image, image_id, question, ts)
                 logr.append(((cur - old).sum() / max(cur.shape[0], 1)).clamp(-self.max_logratio, self.max_logratio))
-            self.a.llm.gradient_checkpointing_disable()
             s = torch.exp(torch.stack(logr))  # (G,) length-normalized sequence ratio
             pg = torch.min(s * adv, s.clamp(1 - self.clip, 1 + self.clip) * adv)
             loss = -pg.mean() / len(items)
@@ -198,9 +208,10 @@ class ToolLoopGSPO:
                 loss.backward()
                 tot_loss += loss.item() * len(items)
             tot_rew += rew.mean().item()
-            item_solved = sum(solved) / self.G  # true solve-rate, not inferred from the shaped reward
+            item_solved = sum(solved_flags) / self.G  # true solve-rate, not inferred from the shaped reward
             self.last_solved.append(item_solved)
             tot_solved += item_solved
+        self.a.llm.gradient_checkpointing_disable()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.a.trainable_parameters(), self.max_grad_norm)
         if torch.isfinite(grad_norm):
             self.opt.step()  # else drop the batch — a non-finite grad would write NaN into the weights

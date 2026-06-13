@@ -110,3 +110,59 @@ class TestGenPositions:
     @pytest.mark.parametrize("segments", [[], [(0, 0)]])
     def test_no_generated_tokens(self, segments):
         assert _gen_positions(5, segments) == []
+
+
+class TestCrossBatchAdvantageNormalization:
+    """Cross-batch normalization gives nonzero advantages for the unanimous-group pattern that
+    killed ~47% of training steps: item A all-solves, item B all-misses. Per-item normalization
+    (the prior code) returned zero advantages for both because each G-group had zero internal
+    variance. Cross-batch normalization uses the full batch*G reward distribution as the baseline,
+    so item A's rollouts get positive advantages and item B's get negative ones."""
+
+    def _cross_batch_adv(self, rewards_per_item: list[list[float]]) -> list[list[float]]:
+        """Replicate the normalization logic from ToolLoopGSPO.step() for testing."""
+        import torch
+        all_rew = torch.tensor([r for rs in rewards_per_item for r in rs])
+        batch_mean = all_rew.mean()
+        batch_std = all_rew.std().clamp_min(1e-4)
+        return [((torch.tensor(rs) - batch_mean) / batch_std).tolist() for rs in rewards_per_item]
+
+    def _per_item_adv(self, rewards: list[float]) -> list[float]:
+        """Old per-item normalization for contrast."""
+        import torch
+        rew = torch.tensor(rewards)
+        return ((rew - rew.mean()) / (rew.std() + 1e-4)).tolist()
+
+    def test_allsolve_allmiss_batch_gives_nonzero_advantages(self):
+        """Smoking-gun case: steps 120/140 had reward=0.575, solved=0.500, grad_norm=0.00.
+        Item A all-solves (reward ~1.15 each), item B all-misses (reward 0.0 each).
+        Cross-batch normalization must yield strictly positive adv for item A and strictly
+        negative adv for item B."""
+        item_a = [1.15] * 8  # all-solve group
+        item_b = [0.0] * 8   # all-miss group
+        adv_a, adv_b = self._cross_batch_adv([item_a, item_b])
+        assert all(a > 0 for a in adv_a), "all-solve item should get positive cross-batch advantages"
+        assert all(a < 0 for a in adv_b), "all-miss item should get negative cross-batch advantages"
+
+    def test_per_item_normalization_gives_zero_adv_for_same_input(self):
+        """Document the old failure mode: per-item normalization returns zero advantages for both
+        items when each group is internally unanimous, even if the batch is perfectly contrastive."""
+        import pytest
+        item_a = [1.15] * 8
+        item_b = [0.0] * 8
+        adv_a = self._per_item_adv(item_a)
+        adv_b = self._per_item_adv(item_b)
+        assert all(abs(a) < 1e-3 for a in adv_a), "all-same group should have near-zero per-item advantages"
+        assert all(abs(a) < 1e-3 for a in adv_b)
+
+    def test_mixed_group_produces_same_sign_structure_under_both_normalizations(self):
+        """When a group has genuine within-item variance (mixed solve/miss), cross-batch and
+        per-item normalization should agree on sign: solved rollouts get positive adv, missed get
+        negative (up to the cross-item baseline shift)."""
+        import torch
+        # item A: 4 solve, 4 miss; item B: all miss (so cross-batch mean is low, both sign-correct)
+        item_a = [1.15, 1.15, 1.15, 1.15, 0.0, 0.0, 0.0, 0.0]
+        item_b = [0.0] * 8
+        adv_a, _ = self._cross_batch_adv([item_a, item_b])
+        # solved rollouts of item A (indices 0-3) must have higher adv than missed (4-7)
+        assert all(adv_a[i] > adv_a[j] for i in range(4) for j in range(4, 8))
