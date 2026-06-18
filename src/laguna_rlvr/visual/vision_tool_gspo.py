@@ -36,21 +36,46 @@ _OCR_OBS = "[ocr of "  # ocr_observation()'s prefix — marks turns where the po
 
 
 def episode_reward(solved: bool, turns: list[Turn], gold: str, final_reply: str, transcript: str,
-                   *, max_turns: int) -> float:
+                   *, max_turns: int, tool_bonus: float = 0.1) -> float:
     """Per-episode reward, dominated by the DISCRETE solve so optimizing it moves the greedy reader (the
     earlier char-similarity proxy let reward climb without ever crossing the solve boundary -> greedy eval
     flat at the 0.125 floor while sampled reward rose). The two shaping terms are each CAUSALLY upstream of
     solving, so they don't pull off-objective; they exist to give within-group spread on unanimous-miss /
     unanimous-solve groups (zero spread -> zero GSPO advantage -> no gradient):
-      tool   — +0.1 when the ocr-call decision matched need (call ocr iff the transcript carries gold):
-               correct tool use is a PREREQUISITE for solving the read, and this is the trust-ratio fix
+      tool   — +`tool_bonus` when the ocr-call decision matched need (call ocr iff transcript carries gold):
+               correct tool use is a PREREQUISITE for solving the read, and this is the trust-ratio fix. It's
+               also the only pro-ocr signal on a transcription item that never solves — raising it (or
+               `_advantages(corpus_norm=...)`) is the ocrvqa-collapse fix; see `_advantages`.
       effic  — +<=0.05 for solving in fewer turns: breaks ties inside the all-solve group
     Scale is irrelevant to GSPO (advantage normalizes); the terms only differentiate near-tied rollouts."""
     answer = 1.0 if solved else 0.0
     called_ocr = any(obs is not None and obs.startswith(_OCR_OBS) for _, obs in turns)
-    tool = 0.1 if called_ocr == _match(gold, transcript) else 0.0
+    tool = tool_bonus if called_ocr == _match(gold, transcript) else 0.0
     effic = 0.05 * (1 - (len(turns) - 1) / max_turns) if solved else 0.0
     return answer + tool + effic
+
+
+def _advantages(rew_groups: list[torch.Tensor], corpora: list[str], *, corpus_norm: bool,
+                baselines: dict[str, float] | None = None, std_floor: float = 1e-4) -> list[torch.Tensor]:
+    """Group-relative GSPO advantages, scaled by the (stable) global batch std either way.
+
+    The centre is the knob. Default (cross-batch) subtracts the global batch mean — but then on a
+    transcription item that never solves, both its ocr-call (+tool) and direct-answer (0) rollouts sit far
+    BELOW a mean inflated by solves elsewhere, so both get negative advantage and the only positive
+    gradient in the batch comes from the direct-answer solves on non-transcription corpora -> the policy
+    drops ocr globally. `corpus_norm` instead centres each item on a RUNNING per-corpus baseline (`baselines`,
+    an EMA the trainer carries across steps), so an unsolved ocr-call (reward = tool_bonus) that beats its
+    corpus's typical reward gets positive advantage — restoring the pro-ocr gradient where the read needs it
+    without touching the good drift on other corpora. The baseline is a cross-step EMA, NOT the within-batch
+    corpus mean, so a batch holding one item per corpus doesn't collapse corpus_norm back to per-item
+    normalization (which would re-starve unanimous groups — the very thing cross-batch centring fixed)."""
+    flat = torch.cat(rew_groups)
+    std = flat.std().clamp_min(std_floor)
+    mean = flat.mean()
+    if not corpus_norm:
+        return [(g - mean) / std for g in rew_groups]
+    base, gmean = baselines or {}, float(mean)  # gmean: one GPU->CPU sync, cold-start for an unseen corpus
+    return [(g - base.get(c, gmean)) / std for g, c in zip(rew_groups, corpora)]
 
 
 def _gen_positions(prompt_len: int, segments: list[tuple[int, int]]) -> list[int]:
@@ -86,11 +111,14 @@ class ToolLoopGSPO:
 
     def __init__(self, adapter: VisualAdapter, *, group_size: int = 6, lr: float = 3e-6, clip: float = 0.2,
                  fmt: str = "poolside", max_turns: int = 4, max_new_tokens: int = 24, temperature: float = 0.8,
-                 max_grad_norm: float = 1.0, max_logratio: float = 10.0):
+                 max_grad_norm: float = 1.0, max_logratio: float = 10.0, tool_bonus: float = 0.1,
+                 corpus_norm: bool = False):
         self.a = adapter
         self.G, self.clip, self.fmt = group_size, clip, fmt
         self.max_turns, self.max_new_tokens, self.temperature = max_turns, max_new_tokens, temperature
         self.max_grad_norm, self.max_logratio = max_grad_norm, max_logratio
+        self.tool_bonus, self.corpus_norm = tool_bonus, corpus_norm
+        self.corpus_baseline: dict[str, float] = {}  # running EMA of per-corpus mean reward (corpus_norm)
         self.opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
         self.pad = adapter.tok.pad_token_id or adapter.tok.eos_token_id
         self.last_rollouts: list = []  # (image, question, replies, rewards) for W&B sample logging
@@ -147,7 +175,8 @@ class ToolLoopGSPO:
                 seq, = self._sample(ctx, 1)
                 ctx, reply, done, solved = self._step_turn(seq, ctx, turns, gold, transcript)
             old = self._cur_logp(image, image_id, question, turns)  # raw old-policy logprob (no grad here)
-            reward = episode_reward(solved, turns, gold, reply, transcript, max_turns=self.max_turns)
+            reward = episode_reward(solved, turns, gold, reply, transcript, max_turns=self.max_turns,
+                                    tool_bonus=self.tool_bonus)
             episodes.append((turns, old, reward, reply, solved))
         return episodes
 
@@ -181,22 +210,27 @@ class ToolLoopGSPO:
         self.a.llm.gradient_checkpointing_disable()
         all_eps = [self._rollout_group(img, iid, q, tr, gold) for img, iid, q, tr, gold in items]
 
-        # Cross-batch advantage normalization pools all batch*G rewards. This preserves signal when
-        # each per-item G-group is internally unanimous but the batch contains easy and hard items.
+        # Advantage normalization pools all batch*G rewards (see _advantages): cross-batch centring keeps
+        # signal when each per-item G-group is unanimous but the batch mixes easy/hard items; corpus_norm
+        # centres per-corpus so an unsolved ocr-call stays positive within its corpus (the ocrvqa fix).
         dev = self.a.llm.device
-        all_rew = torch.tensor([r for eps in all_eps for _, _, r, _, _ in eps], device=dev)
-        batch_mean = all_rew.mean()
-        batch_std = all_rew.std().clamp_min(1e-4)
+        rew_groups = [torch.tensor([r for _, _, r, _, _ in eps], device=dev) for eps in all_eps]
+        corpora = [iid.rsplit(".", 1)[0] for _, iid, _, _, _ in items]
+        adv_groups = _advantages(rew_groups, corpora, corpus_norm=self.corpus_norm,
+                                 baselines=self.corpus_baseline)  # centre on the PRIOR EMA, then update below
+        if self.corpus_norm:
+            for c, g in zip(corpora, rew_groups):
+                gm = float(g.mean())  # one sync/group; seeds the EMA cold-start and the update
+                self.corpus_baseline[c] = 0.9 * self.corpus_baseline.get(c, gm) + 0.1 * gm
 
         # Pass 2: backward with grad; checkpointing remains enabled through every _cur_logp forward.
         tot_loss = tot_rew = tot_solved = 0.0
         self.a.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        for (image, image_id, question, transcript, gold), eps in zip(items, all_eps, strict=True):
-            turns_list, old_logps, rewards, replies, solved_flags = zip(*eps)
-            rew = torch.tensor(rewards, device=dev)
+        for (image, image_id, question, transcript, gold), eps, rew, adv in zip(
+                items, all_eps, rew_groups, adv_groups, strict=True):
+            turns_list, old_logps, _, replies, solved_flags = zip(*eps)
             self.last_rollouts.append((image, question, list(replies),
                                        [round(x, 3) for x in rew.tolist()]))
-            adv = (rew - batch_mean) / batch_std
             logr = []
             for ts, old in zip(turns_list, old_logps, strict=True):
                 cur = self._cur_logp(image, image_id, question, ts)
@@ -293,6 +327,14 @@ def main(
                                              help="bias batches toward the learnable boundary band (items "
                                              "whose solve-rate splits the G group) instead of uniform — the "
                                              "fix for saturated all-solve/all-miss batches starving the grad"),
+    sampler_floor: float = typer.Option(0.05, help="DifficultySampler weight floor — raise it so a corpus "
+                                        "whose solve-EMA collapses (e.g. ocrvqa) keeps getting sampled "
+                                        "instead of being abandoned out of the boundary band"),
+    tool_bonus: float = typer.Option(0.1, help="reward for the correct ocr-call decision; raise to give a "
+                                     "standalone pro-ocr gradient on transcription items that never solve"),
+    corpus_norm: bool = typer.Option(False, "--corpus-norm/--cross-batch-norm",
+                                     help="centre advantage per-corpus (not global batch mean) so an unsolved "
+                                     "ocr-call stays positive within its corpus — the targeted ocrvqa fix"),
     out: str = typer.Option("results/visual"), name_suffix: str = typer.Option("tool_gspo"),
     wandb_tracking: bool = typer.Option(True, "--wandb/--no-wandb"),
 ) -> None:
@@ -309,18 +351,20 @@ def main(
     items = [it for i, it in enumerate(all_items) if i not in held]  # disjoint train split
     print(f"tool-loop GSPO over {len(items)} train / {len(eval_items)} held-out items | "
           f"G={group_size} batch={batch} fmt={fmt} | "
-          f"sampling={'difficulty' if difficulty_sampling else 'uniform'}", flush=True)
+          f"sampling={'difficulty' if difficulty_sampling else 'uniform'} floor={sampler_floor} | "
+          f"tool_bonus={tool_bonus} norm={'corpus' if corpus_norm else 'cross-batch'}", flush=True)
 
     run_name = f"glm_ocr__{Path(base).name}__{name_suffix}"
     run = wandb.init(project="laguna-mm-adapter", name=run_name,
                      config={"group_size": group_size, "batch": batch, "lr": lr, "steps": steps,
                              "temperature": temperature, "max_turns": max_turns, "init_ckpt": init_ckpt,
-                             "reward": "episode_reward"}) if wandb_tracking else None
+                             "reward": "episode_reward", "tool_bonus": tool_bonus, "corpus_norm": corpus_norm,
+                             "sampler_floor": sampler_floor}) if wandb_tracking else None
     trainer = ToolLoopGSPO(adapter, group_size=group_size, lr=lr, fmt=fmt, max_turns=max_turns,
-                           temperature=temperature)
+                           temperature=temperature, tool_bonus=tool_bonus, corpus_norm=corpus_norm)
     out_dir = Path(out) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    sampler = DifficultySampler(len(items)) if difficulty_sampling else None
+    sampler = DifficultySampler(len(items), floor=sampler_floor) if difficulty_sampling else None
     best = -1.0
     for step in range(1, steps + 1):
         idxs = sampler.sample(batch) if sampler else random.sample(range(len(items)), batch)
