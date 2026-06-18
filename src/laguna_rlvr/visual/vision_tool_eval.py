@@ -70,19 +70,24 @@ def _interpret(reply: str, fmt: str, gold: str, transcript: str) -> tuple[str, o
 
 @torch.no_grad()
 def run_episode(adapter: VisualAdapter, image, image_id: str, question: str, transcript: str, gold: str,
-                *, fmt: str = "poolside", max_turns: int = 4, max_new_tokens: int = 24) -> tuple[bool, int, str]:
+                *, fmt: str = "poolside", max_turns: int = 4, max_new_tokens: int = 24, do_sample: bool = False,
+                temperature: float = 1.0, top_p: float = 1.0, repetition_penalty: float = 1.3) -> tuple[bool, int, str]:
     """One encoder+decoder+tool episode. Turn 0 splices the image (the encoder channel) alongside the
     question + tool instructions; each later turn appends the tool observation. Mirrors `VisualAdapter.chat`'s
     context accumulation, but the next turn is decided by parsing the model's reply (`_interpret`), not given.
-    Caller disables gradient checkpointing once around the whole run (see run_probe) — generation only."""
+    Caller disables gradient checkpointing once around the whole run (see run_probe) — generation only.
+
+    Decode defaults to greedy + repetition_penalty=1.3 (the bake-off config — without the penalty this adapter
+    degenerates into a repeat loop). Pass do_sample/temperature/top_p/repetition_penalty to score the *sampled*
+    distribution GSPO trains on instead (vision_tool_gspo's primary eval)."""
     vis = adapter._project([image])[0:1]  # (1, Nv, D) — the encoder channel
     ctx = adapter._embed_multi(episode_prompt(image_id, question, fmt), [vis])
     emb = adapter.llm.get_input_embeddings()
+    sample_kw = dict(do_sample=True, temperature=temperature, top_p=top_p) if do_sample else dict(do_sample=False)
     first_reply = ""
     for turn in range(1, max_turns + 1):
-        # repetition_penalty matches the bake-off — without it this adapter degenerates into a repeat loop.
-        gen = adapter.llm.generate(inputs_embeds=ctx, max_new_tokens=max_new_tokens, do_sample=False,
-                                   repetition_penalty=1.3)
+        gen = adapter.llm.generate(inputs_embeds=ctx, max_new_tokens=max_new_tokens,
+                                   repetition_penalty=repetition_penalty, **sample_kw)
         reply = adapter.tok.decode(gen[0], skip_special_tokens=True).strip()
         first_reply = first_reply or reply
         ctx = torch.cat([ctx, emb(gen)], dim=1)
