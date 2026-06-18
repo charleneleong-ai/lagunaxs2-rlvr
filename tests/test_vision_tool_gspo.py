@@ -147,7 +147,6 @@ class TestCrossBatchAdvantageNormalization:
     def test_per_item_normalization_gives_zero_adv_for_same_input(self):
         """Document the old failure mode: per-item normalization returns zero advantages for both
         items when each group is internally unanimous, even if the batch is perfectly contrastive."""
-        import pytest
         item_a = [1.15] * 8
         item_b = [0.0] * 8
         adv_a = self._per_item_adv(item_a)
@@ -159,7 +158,6 @@ class TestCrossBatchAdvantageNormalization:
         """When a group has genuine within-item variance (mixed solve/miss), cross-batch and
         per-item normalization should agree on sign: solved rollouts get positive adv, missed get
         negative (up to the cross-item baseline shift)."""
-        import torch
         # item A: 4 solve, 4 miss; item B: all miss (so cross-batch mean is low, both sign-correct)
         item_a = [1.15, 1.15, 1.15, 1.15, 0.0, 0.0, 0.0, 0.0]
         item_b = [0.0] * 8
