@@ -78,6 +78,15 @@ def _advantages(rew_groups: list[torch.Tensor], corpora: list[str], *, corpus_no
     return [(g - base.get(c, gmean)) / std for g, c in zip(rew_groups, corpora)]
 
 
+def _kl_to_ref(cur_logp: torch.Tensor, ref_logp: torch.Tensor) -> torch.Tensor:
+    """Per-token k3 estimator (Schulman) of KL(current || reference): unbiased, non-negative, low-variance.
+    Penalizing it leashes the policy to the SFT reference, the textbook fix for the degenerate mode collapse
+    pure-clip GSPO drifts into (ocrvqa -> a memorized constant). The leash is uniform, so it also damps the
+    *beneficial* drift on reasoning corpora — keep the coefficient small and A/B it against the targeted knobs."""
+    delta = ref_logp - cur_logp
+    return torch.exp(delta) - delta - 1.0
+
+
 def _gen_positions(prompt_len: int, segments: list[tuple[int, int]]) -> list[int]:
     """Embedding positions of the generated tokens in a rebuilt trajectory. `segments` is (gen_len,
     obs_len) per turn (obs_len 0 when the turn ended). Pulled out pure — this off-by-one-prone index map
@@ -112,17 +121,40 @@ class ToolLoopGSPO:
     def __init__(self, adapter: VisualAdapter, *, group_size: int = 6, lr: float = 3e-6, clip: float = 0.2,
                  fmt: str = "poolside", max_turns: int = 4, max_new_tokens: int = 24, temperature: float = 0.8,
                  max_grad_norm: float = 1.0, max_logratio: float = 10.0, tool_bonus: float = 0.1,
-                 corpus_norm: bool = False):
+                 corpus_norm: bool = False, kl_coef: float = 0.0):
         self.a = adapter
         self.G, self.clip, self.fmt = group_size, clip, fmt
         self.max_turns, self.max_new_tokens, self.temperature = max_turns, max_new_tokens, temperature
         self.max_grad_norm, self.max_logratio = max_grad_norm, max_logratio
-        self.tool_bonus, self.corpus_norm = tool_bonus, corpus_norm
+        self.tool_bonus, self.corpus_norm, self.kl_coef = tool_bonus, corpus_norm, kl_coef
         self.corpus_baseline: dict[str, float] = {}  # running EMA of per-corpus mean reward (corpus_norm)
+        # KL-to-SFT reference = the warm-start adapter snapshot (the trainer is built right after init_ckpt
+        # loads, before any opt step). Shared frozen base, so the reference is just these trainable deltas.
+        self.ref_state = self._snapshot() if kl_coef > 0 else None
         self.opt = torch.optim.AdamW(adapter.trainable_parameters(), lr=lr)
         self.pad = adapter.tok.pad_token_id or adapter.tok.eos_token_id
         self.last_rollouts: list = []  # (image, question, replies, rewards) for W&B sample logging
         self.last_solved: list[float] = []  # per-item solve fraction this step — feeds the difficulty sampler
+
+    def _snapshot(self) -> dict:
+        """A fully-cloned trainable-param snapshot. adapter_state_dict() cpu-clones the LLM deltas but
+        projector.state_dict() returns LIVE references — and load_adapter_state_dict copies in-place, so an
+        un-cloned projector snapshot would corrupt on the first swap. Clone the projector explicitly."""
+        sd = self.a.adapter_state_dict()
+        sd["projector"] = {k: v.detach().clone() for k, v in sd["projector"].items()}
+        return sd
+
+    def _ref_logps(self, items: list, all_eps: list) -> list[list[torch.Tensor]]:
+        """Per-rollout reference logprobs: swap the SFT snapshot in, score every trajectory under no-grad,
+        swap the current policy back. The base is frozen and shared, so only the trainable deltas move."""
+        cur = self._snapshot()
+        self.a.load_adapter_state_dict(self.ref_state)
+        try:
+            with torch.no_grad():
+                return [[self._cur_logp(im, iid, q, ts) for ts, *_ in eps]
+                        for (im, iid, q, _, _), eps in zip(items, all_eps, strict=True)]
+        finally:
+            self.a.load_adapter_state_dict(cur)  # restore even if a forward raises
 
     def _trim(self, seq: torch.Tensor) -> torch.Tensor:
         """A batched generate right-pads short samples past their first eos; keep through the first eos
@@ -223,21 +255,32 @@ class ToolLoopGSPO:
                 gm = float(g.mean())  # one sync/group; seeds the EMA cold-start and the update
                 self.corpus_baseline[c] = 0.9 * self.corpus_baseline.get(c, gm) + 0.1 * gm
 
+        # Reference logprobs for the optional KL-to-SFT leash — scored before pass 2 flips on checkpointing.
+        # None when the leash is off; [None]*G per item otherwise so the inner zip yields a ref per rollout.
+        ref_logps = self._ref_logps(items, all_eps) if self.kl_coef > 0 else [None] * len(items)
+
         # Pass 2: backward with grad; checkpointing remains enabled through every _cur_logp forward.
-        tot_loss = tot_rew = tot_solved = 0.0
+        tot_loss = tot_rew = tot_solved = tot_kl = 0.0
         self.a.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        for (image, image_id, question, transcript, gold), eps, rew, adv in zip(
-                items, all_eps, rew_groups, adv_groups, strict=True):
+        for (image, image_id, question, transcript, gold), eps, rew, adv, refs in zip(
+                items, all_eps, rew_groups, adv_groups, ref_logps, strict=True):
             turns_list, old_logps, _, replies, solved_flags = zip(*eps)
             self.last_rollouts.append((image, question, list(replies),
                                        [round(x, 3) for x in rew.tolist()]))
-            logr = []
-            for ts, old in zip(turns_list, old_logps, strict=True):
+            refs = refs if refs is not None else [None] * len(turns_list)
+            logr, kls = [], []
+            for ts, old, ref in zip(turns_list, old_logps, refs, strict=True):
                 cur = self._cur_logp(image, image_id, question, ts)
                 logr.append(((cur - old).sum() / max(cur.shape[0], 1)).clamp(-self.max_logratio, self.max_logratio))
+                if ref is not None:
+                    kls.append(_kl_to_ref(cur, ref).mean())
             s = torch.exp(torch.stack(logr))  # (G,) length-normalized sequence ratio
             pg = torch.min(s * adv, s.clamp(1 - self.clip, 1 + self.clip) * adv)
             loss = -pg.mean() / len(items)
+            if kls:  # KL leash off -> no ref tensor, no sync (keeps the other variants' hot path clean)
+                kl = torch.stack(kls).mean()
+                loss = loss + self.kl_coef * kl / len(items)
+                tot_kl += float(kl)
             if torch.isfinite(loss):
                 loss.backward()
                 tot_loss += loss.item() * len(items)
@@ -250,7 +293,8 @@ class ToolLoopGSPO:
         if torch.isfinite(grad_norm):
             self.opt.step()  # else drop the batch — a non-finite grad would write NaN into the weights
         return {"tlg/loss": tot_loss / len(items), "tlg/reward": tot_rew / len(items),
-                "tlg/solved": tot_solved / len(items), "tlg/grad_norm": float(grad_norm)}
+                "tlg/solved": tot_solved / len(items), "tlg/grad_norm": float(grad_norm),
+                "tlg/kl": tot_kl / len(items)}
 
 
 class DifficultySampler:
@@ -335,6 +379,9 @@ def main(
     corpus_norm: bool = typer.Option(False, "--corpus-norm/--cross-batch-norm",
                                      help="centre advantage per-corpus (not global batch mean) so an unsolved "
                                      "ocr-call stays positive within its corpus — the targeted ocrvqa fix"),
+    kl_coef: float = typer.Option(0.0, help="KL-to-SFT leash coefficient (0 = off). Prevents the degenerate "
+                                  "mode collapse, but uniformly — too large also undoes the good drift. "
+                                  "Doubles the per-step forward cost (a reference pass per rollout)"),
     out: str = typer.Option("results/visual"), name_suffix: str = typer.Option("tool_gspo"),
     wandb_tracking: bool = typer.Option(True, "--wandb/--no-wandb"),
 ) -> None:
@@ -352,16 +399,17 @@ def main(
     print(f"tool-loop GSPO over {len(items)} train / {len(eval_items)} held-out items | "
           f"G={group_size} batch={batch} fmt={fmt} | "
           f"sampling={'difficulty' if difficulty_sampling else 'uniform'} floor={sampler_floor} | "
-          f"tool_bonus={tool_bonus} norm={'corpus' if corpus_norm else 'cross-batch'}", flush=True)
+          f"tool_bonus={tool_bonus} norm={'corpus' if corpus_norm else 'cross-batch'} kl={kl_coef}", flush=True)
 
     run_name = f"glm_ocr__{Path(base).name}__{name_suffix}"
     run = wandb.init(project="laguna-mm-adapter", name=run_name,
                      config={"group_size": group_size, "batch": batch, "lr": lr, "steps": steps,
                              "temperature": temperature, "max_turns": max_turns, "init_ckpt": init_ckpt,
                              "reward": "episode_reward", "tool_bonus": tool_bonus, "corpus_norm": corpus_norm,
-                             "sampler_floor": sampler_floor}) if wandb_tracking else None
+                             "sampler_floor": sampler_floor, "kl_coef": kl_coef}) if wandb_tracking else None
     trainer = ToolLoopGSPO(adapter, group_size=group_size, lr=lr, fmt=fmt, max_turns=max_turns,
-                           temperature=temperature, tool_bonus=tool_bonus, corpus_norm=corpus_norm)
+                           temperature=temperature, tool_bonus=tool_bonus, corpus_norm=corpus_norm,
+                           kl_coef=kl_coef)
     out_dir = Path(out) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     sampler = DifficultySampler(len(items), floor=sampler_floor) if difficulty_sampling else None

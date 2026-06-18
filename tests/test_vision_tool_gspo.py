@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from laguna_rlvr.visual.vision_tool_gspo import (DifficultySampler, _advantages, _eval_solved,
-                                                 _gen_positions, episode_reward)
+                                                 _gen_positions, _kl_to_ref, episode_reward)
 
 
 class TestEpisodeReward:
@@ -203,3 +203,18 @@ class TestCorpusNormAdvantage:
         cn = _advantages(groups, ["a", "b"], corpus_norm=True, baselines={})
         xb = _advantages(groups, ["a", "b"], corpus_norm=False)
         assert cn[0].tolist() == pytest.approx(xb[0].tolist())
+
+
+class TestKLToRef:
+    """k3 estimator of KL(current || SFT-reference) — the anti-collapse leash. Non-negative, zero only when
+    the policies match, and growing with the gap (so a policy drifting toward a degenerate constant pays)."""
+
+    def test_zero_when_policies_match(self):
+        lp = torch.tensor([-0.5, -1.2, -0.1])
+        assert _kl_to_ref(lp, lp).tolist() == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)
+
+    def test_nonnegative_and_grows_with_divergence(self):
+        cur = torch.tensor([-0.5, -0.5])
+        near, far = torch.tensor([-0.6, -0.6]), torch.tensor([-3.0, -3.0])
+        assert (_kl_to_ref(cur, far) >= 0).all() and (_kl_to_ref(cur, near) >= 0).all()
+        assert _kl_to_ref(cur, far).mean() > _kl_to_ref(cur, near).mean()

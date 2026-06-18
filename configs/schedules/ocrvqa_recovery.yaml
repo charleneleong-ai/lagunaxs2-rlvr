@@ -38,3 +38,6 @@ variants:
   - name: tool-bump         # mechanism 1 — widen the standalone pro-ocr reward (0.1 -> 0.4)
     suffix: tool_gspo_toolbump
     flags: "--tool-bonus 0.4"
+  - name: kl-anchor         # blunt anti-collapse leash to the SFT reference (small beta — too large also
+    suffix: tool_gspo_kl    # undoes the good drift); doubles per-step forward cost (a reference pass/rollout)
+    flags: "--kl-coef 0.02"
