@@ -431,12 +431,12 @@ app = typer.Typer(add_completion=False, help=__doc__)
 @app.command()
 def main(
     config: str = _DEFAULT_CONFIG,
-    encoder: str = typer.Option("glm_ocr", help="glm_ocr | qwen3_vl"),
+    encoder: str = typer.Option("glm_ocr", help="glm_ocr | qwen3_vl | siglip | siglip_naflex | patchify (encoder-free)"),
     base: str = typer.Option(None, help="override the config backbone (e.g. Qwen/Qwen3-0.6B for debug)"),
     steps: int = typer.Option(None, help="override config max_steps"),
     n_train: int = 512,
     pool: int = 4,
-    projector: str = typer.Option("linear", help="linear | mlp"),
+    projector: str = typer.Option("linear", help="linear | mlp | resampler | patch_embed (pair with --encoder patchify)"),
     out: str = "results/visual",
     seed: int = DEFAULT_SEED,
     dataset: str = typer.Option("synthetic", help=" | ".join(CHOICES)),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from transformers import (AutoImageProcessor, AutoModelForImageTextToText, Siglip2VisionModel,
                           SiglipVisionModel)
@@ -121,10 +122,64 @@ class Siglip2NaflexEncoder:
         return mean_pool(torch.stack(feats, dim=0), self.pool)
 
 
+def extract_flattened_patches(x: torch.Tensor, patch_size: int) -> torch.Tensor:
+    """(B, C, H, W) -> (B, nh·nw, C·P·P): split into P×P patches, flatten each in row-major order.
+    A single reshape→permute→reshape (no Python loop) so it stays one parallel GPU op."""
+    b, c, h, w = x.shape
+    p, nh, nw = patch_size, h // patch_size, w // patch_size
+    x = x.reshape(b, c, nh, p, nw, p).permute(0, 2, 4, 1, 3, 5)  # (B, nh, nw, C, P, P)
+    return x.reshape(b, nh * nw, c * p * p)
+
+
+@dataclass
+class PatchifyEncoder:
+    """Encoder-free patchifier (Gemma 4 / Fuyu style): NO pretrained tower. Standardizes each image
+    (resize shorter side -> `img_size`, center-crop square) and emits raw flattened pixel patches
+    (B, grid², 3·P·P) in [0, 1]. `d_enc = 3·P·P`; the trainable `PatchEmbedder` projector turns these
+    into LLM tokens. Same `encode -> (B, N, d_enc)` interface as `Encoder`, so it drops into
+    VisualAdapter unchanged — the heavy frozen tower is replaced by a resize + reshape."""
+
+    img_size: int = 512
+    patch_size: int = 32
+    pool: int = 1
+
+    def __post_init__(self):
+        # Encoder-free is strictly 1:1 patch->token; pooling raw patches scrambles the row-major layout
+        # the patch_embed positional table assumes. Reject it loudly rather than emit misaligned tokens.
+        if self.pool != 1:
+            raise ValueError(f"patchify is 1:1 patch->token; pool must be 1, got {self.pool}")
+
+    @property
+    def d_enc(self) -> int:
+        return 3 * self.patch_size ** 2
+
+    @property
+    def grid(self) -> int:
+        return self.img_size // self.patch_size
+
+    def _standardize(self, img) -> torch.Tensor:
+        """Resize shorter side to `img_size` (upscales small images), center-crop, -> (3, S, S) in [0, 1]."""
+        img = img.convert("RGB")
+        w, h = img.size
+        scale = self.img_size / min(w, h)
+        img = img.resize((max(round(w * scale), self.img_size), max(round(h * scale), self.img_size)))
+        w, h = img.size
+        left, top = (w - self.img_size) // 2, (h - self.img_size) // 2
+        img = img.crop((left, top, left + self.img_size, top + self.img_size))
+        arr = torch.from_numpy(np.array(img, dtype=np.uint8))  # (S, S, 3); np.array copies -> writable
+        return arr.permute(2, 0, 1).float() / 255.0
+
+    def encode(self, images: list) -> torch.Tensor:
+        x = torch.stack([self._standardize(img) for img in images])  # (B, 3, S, S)
+        return extract_flattened_patches(x, self.patch_size)  # (B, grid², 3·P·P); pool pinned to 1
+
+
 def load_encoder(name: str, pool: int = 1, dtype: torch.dtype | None = None,
                  device: str | None = None, grid: int = 2):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     dtype = dtype or (torch.bfloat16 if device.startswith("cuda") else torch.float32)
+    if name in ("patchify", "encoder_free"):  # no tower to load/place — just the resize+reshape
+        return PatchifyEncoder(pool=pool)
     if name == "siglip_naflex":
         tower = Siglip2VisionModel.from_pretrained(_SIGLIP_NAFLEX_REPO, dtype=dtype).eval().to(device)
         for p in tower.parameters():
@@ -139,7 +194,8 @@ def load_encoder(name: str, pool: int = 1, dtype: torch.dtype | None = None,
         return SiglipAnyResEncoder(tower=tower, processor=processor, d_enc=tower.config.hidden_size,
                                    pool=pool, grid=grid)
     if name not in _REPOS:
-        raise ValueError(f"unknown encoder {name!r}; choose from {list(_REPOS) + ['siglip', 'siglip_naflex']}")
+        raise ValueError(f"unknown encoder {name!r}; choose from "
+                         f"{list(_REPOS) + ['siglip', 'siglip_naflex', 'patchify']}")
     repo = _REPOS[name]
     full = AutoModelForImageTextToText.from_pretrained(repo, dtype=dtype)
     tower = _resolve(full, _TOWER_PATH).eval().to(device)
