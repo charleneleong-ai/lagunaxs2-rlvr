@@ -2,7 +2,7 @@
 
 **Branch:** `feat/encoder-free-vlm` · **Date:** 2026-06-19
 
-Adopt the encoder-free "embedder" from HuggingFaceM4's [*Train Your Own Encoder-Free VLM in $100*](https://huggingface.co/spaces/HuggingFaceM4/encoder-free-vlm) (the architecture behind Gemma 4, lineage Fuyu): drop the pretrained vision tower and feed **raw pixel patches** straight into the frozen LLM through one trainable linear embedder.
+Adopt the **encoder-free** VLM design — drop the pretrained vision tower and feed **raw pixel patches** straight into the frozen LLM through one trainable linear embedder. This is the architecture Google DeepMind shipped in **Gemma 4 12B** (encoder-free multimodal, Jun 2026), lineage **Fuyu → EVE → SOLO**; the walkthrough we follow for the embedder recipe is HuggingFaceM4's [*Train Your Own Encoder-Free VLM in $100*](https://huggingface.co/spaces/HuggingFaceM4/encoder-free-vlm). See [References](#references) for the papers.
 
 ## Why it drops into Laguna cleanly
 
@@ -38,3 +38,21 @@ Both run via the existing `train.py` (`--encoder patchify --projector patch_embe
 
 - **Batched encode for fixed-shape encoders.** `_project` loops per-image (needed for variable-N NaFlex); `PatchifyEncoder` emits uniform N and could encode + transfer the whole list in one shot at eval. Training runs `micro_batch=1`, so no waste there — deferred to avoid touching the shared hot path.
 - **`Encoder` as a `typing.Protocol`** — the interface is duck-typed by convention; a Protocol would make `encode`/`d_enc`/`pool` explicit.
+
+## References
+
+**Patch embedding (origin).** Dosovitskiy et al., [*An Image is Worth 16×16 Words: Transformers for Image Recognition at Scale*](https://arxiv.org/abs/2010.11929) (ViT, ICLR 2021) — the linear patch projection + positional embedding our embedder reuses. ViLT, [*Vision-and-Language Transformer Without Convolution or Region Supervision*](https://arxiv.org/abs/2102.03334) (Kim et al., 2021) — early convolution-/encoder-free patch projection into a transformer.
+
+**Encoder-free VLMs (the lineage we follow — linear patch projection).**
+- **Fuyu-8B** (Adept, 2023) — [blog](https://www.adept.ai/blog/fuyu-8b); first decoder-only VLM projecting image patches linearly into the LLM, no vision tower. No paper.
+- **EVE** — Diao et al., [*Unveiling Encoder-Free Vision-Language Models*](https://arxiv.org/abs/2406.11832) (NeurIPS 2024). The canonical encoder-free study + training recipe.
+- **EVEv2** — Diao et al., [*Improved Baselines for Encoder-Free Vision-Language Models*](https://arxiv.org/abs/2502.06788) (2025). Modality decomposition + scaling.
+- **SOLO** — Chen et al., [*A Single Transformer for Scalable Vision-Language Modeling*](https://arxiv.org/abs/2407.06438) (TMLR 2024). Fuyu-style linear projection, reproducible recipe.
+
+**Most relevant to Laguna (visual capacity inside a frozen/MoE backbone).**
+- **Mono-InternVL** — Luo et al., [*Pushing the Boundaries of Monolithic Multimodal LLMs with Endogenous Visual Pre-training*](https://arxiv.org/abs/2410.08202) (CVPR 2025) and [**Mono-InternVL-1.5**](https://arxiv.org/abs/2507.12566) (2025) — adds visual experts via a **multimodal MoE** in the LLM; directly germane since Laguna-XS.2 is an MoE backbone (a future step beyond the linear embedder).
+- **BREEN** — Li et al., [*Bridge Data-Efficient Encoder-Free Multimodal Learning with Learnable Queries*](https://arxiv.org/abs/2503.12446) (2025). Data-efficient learnable-query bridge.
+- **HoVLE** — Tao et al., [*Unleashing the Power of Monolithic VLMs with Holistic Vision-Language Embedding*](https://arxiv.org/abs/2412.16158) (2024).
+- **VoRA** — [*Vision as LoRA*](https://arxiv.org/abs/2503.20680) (2025); **Native VL primitives** — [*From Pixels to Words*](https://arxiv.org/abs/2510.14979) (2025).
+
+**The product this POC mirrors.** Google DeepMind, **Gemma 4 12B** — unified encoder-free multimodal (text/image/audio), released 3 Jun 2026: [announcement](https://blog.google/innovation-and-ai/technology/developers-tools/introducing-gemma-4-12b/) · [HF release](https://huggingface.co/blog/gemma4).
