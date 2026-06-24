@@ -33,9 +33,23 @@ from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.encoders import load_encoder
 from laguna_rlvr.visual.hf_image_text import HFImageTextDataset
 from laguna_rlvr.visual.metrics import generation_metrics
-from laguna_rlvr.visual.model import VisualAdapter
+from laguna_rlvr.visual.model import VisualAdapter, _MAX_SEQ_TOKENS
 
 _DEFAULT_CONFIG = "configs/mm_adapter/a100-80gb-laguna-bf16.toml"
+_MIN_LABEL_HEADROOM = 128  # min label-token room a patchify grid must leave under _MAX_SEQ_TOKENS
+
+
+def _assert_patchify_fits(grid: int) -> None:
+    """Patchify emits grid² vision tokens 1:1; if that block crowds the label out of the loss seq-cap,
+    forward() skips every (vision+label) sequence and the loss silently collapses to 0 (caught
+    2026-06-24: patch16@512 → 1024 ≥ _MAX_SEQ_TOKENS=896). Fail loudly, don't burn GPU at loss=0."""
+    n_vis = grid ** 2
+    if n_vis + _MIN_LABEL_HEADROOM > _MAX_SEQ_TOKENS:
+        raise SystemExit(
+            f"patchify {grid}×{grid}={n_vis} vision tokens leave < {_MIN_LABEL_HEADROOM} for the label "
+            f"under _MAX_SEQ_TOKENS={_MAX_SEQ_TOKENS} → every sequence is skipped and the loss is 0. "
+            f"Lower --img-size or raise --patch-size (grid = img_size ÷ patch_size)."
+        )
 
 
 def _collate(batch):
@@ -145,7 +159,8 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
           lr_override: float | None = None, vqa: str = "default", norm_penalty: float = 0.0,
           qa_eval_n: int = 40, lora_rank: int = 16, design_codegen: bool = False, tasks: str = "",
           unfreeze_layers: int = 4, unfreeze_lr_mult: float = 0.1,
-          grid: int = 2, n_queries: int = 256) -> Path:
+          grid: int = 2, n_queries: int = 256,
+          patch_size: int = 32, img_size: int = 512) -> Path:
     seed_everything(seed)
     cfg = tomllib.loads(Path(config).read_text())
     plan = plan_from_config(cfg)
@@ -161,7 +176,9 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
     if base == plan.backbone_model and issues:
         raise SystemExit("Guardrail failures for the configured backbone:\n- " + "\n- ".join(issues))
 
-    enc = load_encoder(encoder, pool=pool, grid=grid)
+    enc = load_encoder(encoder, pool=pool, grid=grid, patch_size=patch_size, img_size=img_size)
+    if encoder in ("patchify", "encoder_free"):
+        _assert_patchify_fits(enc.grid)
     adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze,
                             use_anchor=use_anchor, norm_penalty=norm_penalty, lora_rank=lora_rank,
                             unfreeze_layers=unfreeze_layers, n_queries=n_queries)
@@ -464,11 +481,13 @@ def main(
     tasks: str = typer.Option("", help="task->dataset lookup: comma list of capabilities (e.g. 'vqa,design,ocr'); composes mix+vqa+design-codegen, overrides --mixture/--vqa"),
     grid: int = typer.Option(2, help="AnyRes tile grid (siglip encoder): 1+grid^2 tiles, effective res = 384*grid; raise for glyph-readable dense docs"),
     n_queries: int = typer.Option(256, help="resampler output tokens fed to the decoder; raise to widen the dense-OCR squeeze (warm-start reinits the resized query bank)"),
+    patch_size: int = typer.Option(32, help="patchify patch size in px (smaller = finer grid / more vision tokens, finer glyph detail); pair with --encoder patchify"),
+    img_size: int = typer.Option(512, help="patchify square input resolution in px (larger = more pixels per glyph); grid = img_size / patch_size"),
 ) -> None:
     train(config, encoder, base, steps, n_train, pool, projector, out, seed, dataset, wandb_tracking,
           resume, mixture, name_suffix, eval_dataset, patience, min_delta, qa_eval, description, init_projector,
           objective, unfreeze, anchor, lr, vqa, norm_penalty, qa_eval_n, lora_rank, design_codegen, tasks,
-          unfreeze_layers, unfreeze_lr_mult, grid, n_queries)
+          unfreeze_layers, unfreeze_lr_mult, grid, n_queries, patch_size, img_size)
 
 
 if __name__ == "__main__":

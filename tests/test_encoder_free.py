@@ -13,6 +13,7 @@ from laguna_rlvr.visual.data import SyntheticOCR
 from laguna_rlvr.visual.encoders import PatchifyEncoder, extract_flattened_patches, load_encoder
 from laguna_rlvr.visual.model import VisualAdapter
 from laguna_rlvr.visual.projector import PatchEmbedder, Projector
+from laguna_rlvr.visual.train import _assert_patchify_fits
 
 BASE = "Qwen/Qwen3-0.6B"
 
@@ -40,6 +41,27 @@ class TestPatchifyEncoder:
         out = enc.encode([_img(640, 480), _img(200, 900)])  # mixed sizes standardize to one shape
         assert out.shape == (2, 256, 3072)  # 16×16 patches, 3·32·32-dim each
         assert enc.d_enc == 3072 and enc.grid == 16
+
+    @pytest.mark.parametrize("img_size,patch_size,grid,d_enc", [
+        (512, 32, 16, 3072),   # default: coarse
+        (512, 16, 32, 768),    # finer grid, smaller per-patch dim (higher-res reading test)
+        (768, 32, 24, 3072),   # bigger canvas, same patch
+    ])
+    def test_resolution_knobs_set_grid_and_dims(self, img_size, patch_size, grid, d_enc):
+        enc = load_encoder("patchify", patch_size=patch_size, img_size=img_size)
+        out = enc.encode([_img(640, 480)])
+        assert enc.grid == grid and enc.d_enc == d_enc
+        assert out.shape == (1, grid * grid, d_enc)
+
+    @pytest.mark.parametrize("grid,fits", [(16, True), (24, True), (32, False), (28, False)])
+    def test_seq_cap_guard_rejects_token_blowup(self, grid, fits):
+        # A grid whose grid² vision tokens crowd out the label budget can never train (loss=0); the
+        # guard must reject it loudly. patch16@512 → grid 32 = 1024 tokens is the case that bit us.
+        if fits:
+            _assert_patchify_fits(grid)
+        else:
+            with pytest.raises(SystemExit, match="loss is 0"):
+                _assert_patchify_fits(grid)
 
     def test_small_image_upscaled_and_normalized(self):
         # A 10×10 image must upscale (shorter side -> 512), crop to exactly 512×512, pixels in [0, 1].

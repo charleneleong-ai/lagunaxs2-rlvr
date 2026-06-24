@@ -175,11 +175,12 @@ class PatchifyEncoder:
 
 
 def load_encoder(name: str, pool: int = 1, dtype: torch.dtype | None = None,
-                 device: str | None = None, grid: int = 2):
+                 device: str | None = None, grid: int = 2,
+                 patch_size: int = 32, img_size: int = 512):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     dtype = dtype or (torch.bfloat16 if device.startswith("cuda") else torch.float32)
     if name in ("patchify", "encoder_free"):  # no tower to load/place — just the resize+reshape
-        return PatchifyEncoder(pool=pool)
+        return PatchifyEncoder(pool=pool, patch_size=patch_size, img_size=img_size)
     if name == "siglip_naflex":
         tower = Siglip2VisionModel.from_pretrained(_SIGLIP_NAFLEX_REPO, dtype=dtype).eval().to(device)
         for p in tower.parameters():
