@@ -4,10 +4,13 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from PIL import ImageOps
 from transformers import (AutoImageProcessor, AutoModelForImageTextToText, Siglip2VisionModel,
                           SiglipVisionModel)
 
 from laguna_rlvr.visual.projector import mean_pool
+
+PATCHIFY_NAMES = ("patchify", "encoder_free")  # encoder-free path: name + alias (shared with train.py)
 
 _REPOS = {"glm_ocr": "zai-org/GLM-OCR", "qwen3_vl": "Qwen/Qwen3-VL-4B-Instruct",
           "qwen3_vl_8b": "Qwen/Qwen3-VL-8B-Instruct"}  # stronger general vision tower for the projector
@@ -158,14 +161,8 @@ class PatchifyEncoder:
         return self.img_size // self.patch_size
 
     def _standardize(self, img) -> torch.Tensor:
-        """Resize shorter side to `img_size` (upscales small images), center-crop, -> (3, S, S) in [0, 1]."""
-        img = img.convert("RGB")
-        w, h = img.size
-        scale = self.img_size / min(w, h)
-        img = img.resize((max(round(w * scale), self.img_size), max(round(h * scale), self.img_size)))
-        w, h = img.size
-        left, top = (w - self.img_size) // 2, (h - self.img_size) // 2
-        img = img.crop((left, top, left + self.img_size, top + self.img_size))
+        """Scale shorter side to `img_size` (upscales small images), center-crop -> (3, S, S) in [0, 1]."""
+        img = ImageOps.fit(img.convert("RGB"), (self.img_size, self.img_size))  # cover-then-center-crop
         arr = torch.from_numpy(np.array(img, dtype=np.uint8))  # (S, S, 3); np.array copies -> writable
         return arr.permute(2, 0, 1).float() / 255.0
 
@@ -179,7 +176,7 @@ def load_encoder(name: str, pool: int = 1, dtype: torch.dtype | None = None,
                  patch_size: int = 32, img_size: int = 512):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     dtype = dtype or (torch.bfloat16 if device.startswith("cuda") else torch.float32)
-    if name in ("patchify", "encoder_free"):  # no tower to load/place — just the resize+reshape
+    if name in PATCHIFY_NAMES:  # no tower to load/place — just the resize+reshape
         return PatchifyEncoder(pool=pool, patch_size=patch_size, img_size=img_size)
     if name == "siglip_naflex":
         tower = Siglip2VisionModel.from_pretrained(_SIGLIP_NAFLEX_REPO, dtype=dtype).eval().to(device)

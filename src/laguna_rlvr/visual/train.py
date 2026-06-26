@@ -30,7 +30,7 @@ from laguna_rlvr.visual.corpora import (CHOICES, DEFAULT_VQA, QASFTDataset, comp
 from laguna_rlvr.visual.multiturn_qa import (_RECALL_Q, dataset_qa_accuracy, evaluate_multiturn_qa,
                                              image_fetcher, mixture_episodes)
 from laguna_rlvr.visual.data import SyntheticOCR
-from laguna_rlvr.visual.encoders import load_encoder
+from laguna_rlvr.visual.encoders import PATCHIFY_NAMES, load_encoder
 from laguna_rlvr.visual.hf_image_text import HFImageTextDataset
 from laguna_rlvr.visual.metrics import generation_metrics
 from laguna_rlvr.visual.model import VisualAdapter, _MAX_SEQ_TOKENS
@@ -177,7 +177,7 @@ def train(config: str = _DEFAULT_CONFIG, encoder: str = "glm_ocr", base: str | N
         raise SystemExit("Guardrail failures for the configured backbone:\n- " + "\n- ".join(issues))
 
     enc = load_encoder(encoder, pool=pool, grid=grid, patch_size=patch_size, img_size=img_size)
-    if encoder in ("patchify", "encoder_free"):
+    if encoder in PATCHIFY_NAMES:
         _assert_patchify_fits(enc.grid)
     adapter = VisualAdapter(enc, base, projector_kind=projector_kind, unfreeze=unfreeze,
                             use_anchor=use_anchor, norm_penalty=norm_penalty, lora_rank=lora_rank,
