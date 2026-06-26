@@ -57,11 +57,49 @@ class Resampler(nn.Module):
         return self.out(self.norm(q))
 
 
+class PatchEmbedder(nn.Module):
+    """Encoder-free 'embedder' (Gemma 4 / Fuyu style): raw flattened pixel patches -> LLM tokens, with
+    NO pretrained vision tower. Input is (B, N, patch_dim) raw-pixel patches from `PatchifyEncoder`;
+    output is (B, N, d_out) ready to splice at <image>. The whole module is trainable — it IS the bridge.
+
+    Recipe (matches Gemma 4 12B's embedder): LayerNorm -> Linear(patch_dim -> d_out) -> LayerNorm ->
+    add factorized row/col positional embeddings -> LayerNorm -> connector Linear(d_out -> d_out). The
+    factorized table (`E_row[i] + E_col[j]`) costs 2·g·d_out params vs g²·d_out for a full g×g table.
+
+    The grid side is read from the incoming token count at forward (`g = √N`), so the same module
+    serves any square patch grid up to `max_grid` — no per-encoder grid wiring.
+    """
+
+    def __init__(self, patch_dim: int, d_out: int, max_grid: int = 64):
+        super().__init__()
+        self.ln_in = nn.LayerNorm(patch_dim)
+        self.fc = nn.Linear(patch_dim, d_out)
+        self.ln_proj = nn.LayerNorm(d_out)
+        self.row_emb = nn.Parameter(torch.randn(max_grid, d_out) * 0.02)
+        self.col_emb = nn.Parameter(torch.randn(max_grid, d_out) * 0.02)
+        self.ln_pos = nn.LayerNorm(d_out)
+        self.connector = nn.Linear(d_out, d_out)
+
+    def _positions(self, n: int, dtype: torch.dtype) -> torch.Tensor:
+        """The `n` factorized positions in row-major order: pos(i, j) = E_row[i] + E_col[j], grid g = √n."""
+        g = round(n ** 0.5)
+        if g * g != n:
+            raise ValueError(f"patch_embed expects a square patch grid; got {n} tokens (√n not integer)")
+        pos = self.row_emb[:g].unsqueeze(1) + self.col_emb[:g].unsqueeze(0)  # (g, g, d)
+        return pos.reshape(n, -1).to(dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, patch_dim) -> (B, N, d_out)
+        x = self.ln_proj(self.fc(self.ln_in(x)))
+        x = self.ln_pos(x + self._positions(x.shape[1], x.dtype).unsqueeze(0))
+        return self.connector(x)
+
+
 class Projector(nn.Module):
     """Maps frozen-encoder features (d_in) into the LLM embedding space (d_out).
 
     The only trainable module in the adapter. `linear` = LLaVA-1.0; `mlp` = LLaVA-1.5;
-    `resampler` = Perceiver connector emitting a fixed token count.
+    `resampler` = Perceiver connector emitting a fixed token count; `patch_embed` = encoder-free
+    Gemma-4/Fuyu embedder mapping raw pixel patches straight in (see `PatchEmbedder`).
     """
 
     def __init__(self, d_in: int, d_out: int, kind: str = "linear", n_queries: int = 256):
@@ -72,8 +110,11 @@ class Projector(nn.Module):
             self.net = nn.Sequential(nn.Linear(d_in, d_out), nn.GELU(), nn.Linear(d_out, d_out))
         elif kind == "resampler":
             self.net = Resampler(d_in, d_out, n_queries=n_queries)
+        elif kind == "patch_embed":
+            self.net = PatchEmbedder(d_in, d_out)
         else:
-            raise ValueError(f"unknown projector kind {kind!r} (use 'linear', 'mlp', or 'resampler')")
+            raise ValueError(
+                f"unknown projector kind {kind!r} (use 'linear', 'mlp', 'resampler', or 'patch_embed')")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
