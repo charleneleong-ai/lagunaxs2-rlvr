@@ -1,9 +1,10 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
-from laguna_rlvr.visual.vision_tool_gspo import (DifficultySampler, _eval_solved, _gen_positions,
-                                                 episode_reward)
+from laguna_rlvr.visual.vision_tool_gspo import (DifficultySampler, _advantages, _eval_solved,
+                                                 _gen_positions, _kl_to_ref, episode_reward)
 
 
 class TestEpisodeReward:
@@ -31,6 +32,13 @@ class TestEpisodeReward:
         called = episode_reward(False, self._done("[ocr of d.png]\nTotal 42.50"), "42.50", "x", "Total 42.50", max_turns=4)
         skipped = episode_reward(False, self._done(), "42.50", "x", "Total 42.50", max_turns=4)
         assert called == pytest.approx(skipped + 0.1)
+
+    def test_tool_bonus_scales_the_ocr_signal(self):
+        # the ocrvqa knob: a larger tool_bonus widens the pro-ocr gap on a transcription item that never solves
+        called = episode_reward(False, self._done("[ocr of d.png]\nTotal 42.50"), "42.50", "x", "Total 42.50",
+                                max_turns=4, tool_bonus=0.4)
+        skipped = episode_reward(False, self._done(), "42.50", "x", "Total 42.50", max_turns=4, tool_bonus=0.4)
+        assert called == pytest.approx(skipped + 0.4)
 
     def test_fewer_turns_scores_higher_when_solved(self):
         # both never call ocr (same tool decision), so the gap is purely the efficiency tie-breaker
@@ -93,6 +101,15 @@ class TestDifficultySampler:
         s = DifficultySampler(2, floor=0.05)
         assert s.weights().tolist() == pytest.approx([0.3, 0.3])  # floor + 0.5*0.5, optimistic
 
+    def test_higher_floor_keeps_a_collapsed_corpus_drawable(self):
+        # the ocrvqa knob: once a corpus's solve-EMA collapses to 0 its variance is 0, so the floor is its
+        # entire sampling weight — raising the floor stops it being abandoned out of the boundary band
+        lo, hi = DifficultySampler(1, floor=0.05), DifficultySampler(1, floor=0.30)
+        lo.update(0, 0.0)
+        hi.update(0, 0.0)
+        assert lo.weights()[0] == pytest.approx(0.05)
+        assert hi.weights()[0] == pytest.approx(0.30)  # ~6x more likely to keep getting gradient
+
 
 class TestGenPositions:
     """The index map that decides which trajectory tokens get credited under the policy gradient — an
@@ -120,16 +137,14 @@ class TestCrossBatchAdvantageNormalization:
     so item A's rollouts get positive advantages and item B's get negative ones."""
 
     def _cross_batch_adv(self, rewards_per_item: list[list[float]]) -> list[list[float]]:
-        """Replicate the normalization logic from ToolLoopGSPO.step() for testing."""
-        import torch
-        all_rew = torch.tensor([r for rs in rewards_per_item for r in rs])
-        batch_mean = all_rew.mean()
-        batch_std = all_rew.std().clamp_min(1e-4)
-        return [((torch.tensor(rs) - batch_mean) / batch_std).tolist() for rs in rewards_per_item]
+        """The real cross-batch path of `_advantages` (distinct corpus labels are irrelevant when
+        corpus_norm is off — centring is the global batch mean)."""
+        groups = [torch.tensor(rs) for rs in rewards_per_item]
+        corpora = [str(i) for i in range(len(groups))]
+        return [a.tolist() for a in _advantages(groups, corpora, corpus_norm=False)]
 
     def _per_item_adv(self, rewards: list[float]) -> list[float]:
         """Old per-item normalization for contrast."""
-        import torch
         rew = torch.tensor(rewards)
         return ((rew - rew.mean()) / (rew.std() + 1e-4)).tolist()
 
@@ -164,3 +179,42 @@ class TestCrossBatchAdvantageNormalization:
         adv_a, _ = self._cross_batch_adv([item_a, item_b])
         # solved rollouts of item A (indices 0-3) must have higher adv than missed (4-7)
         assert all(adv_a[i] > adv_a[j] for i in range(4) for j in range(4, 8))
+
+
+class TestCorpusNormAdvantage:
+    """corpus_norm centres each item on a RUNNING per-corpus baseline instead of the global batch mean —
+    the targeted ocrvqa fix. The invariant: an unsolved ocr-call on a transcription corpus, batched with a
+    higher-reward reasoning corpus, gets NEGATIVE advantage under cross-batch (swamped) but POSITIVE under
+    corpus_norm (it beats its corpus's own typical reward)."""
+
+    def test_unsolved_ocr_call_flips_positive_under_corpus_norm(self):
+        chart = torch.tensor([1.1, 1.1, 1.1, 0.0])          # reasoning corpus, mostly solves
+        ocr = torch.tensor([0.4, 0.0, 0.0, 0.0])            # ocrvqa: all miss; idx 0 called ocr (tool_bonus)
+        corpora = ["chartqa", "ocrvqa"]
+        baselines = {"chartqa": 0.8, "ocrvqa": 0.1}         # warmed-up running EMAs
+        x_adv = _advantages([chart, ocr], corpora, corpus_norm=False)[1]
+        c_adv = _advantages([chart, ocr], corpora, corpus_norm=True, baselines=baselines)[1]
+        assert x_adv[0] < 0, "cross-batch swamps the unsolved ocr-call below the solve-inflated mean"
+        assert c_adv[0] > 0 > c_adv[1], "corpus_norm lifts the ocr-call above its corpus baseline; direct-answer stays below"
+
+    def test_missing_baseline_falls_back_to_batch_mean(self):
+        # an unseen corpus (cold EMA) must not crash — it centres on the global mean, == cross-batch for it
+        groups = [torch.tensor([1.0, 0.0]), torch.tensor([0.5, 0.5])]
+        cn = _advantages(groups, ["a", "b"], corpus_norm=True, baselines={})
+        xb = _advantages(groups, ["a", "b"], corpus_norm=False)
+        assert cn[0].tolist() == pytest.approx(xb[0].tolist())
+
+
+class TestKLToRef:
+    """k3 estimator of KL(current || SFT-reference) — the anti-collapse leash. Non-negative, zero only when
+    the policies match, and growing with the gap (so a policy drifting toward a degenerate constant pays)."""
+
+    def test_zero_when_policies_match(self):
+        lp = torch.tensor([-0.5, -1.2, -0.1])
+        assert _kl_to_ref(lp, lp).tolist() == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)
+
+    def test_nonnegative_and_grows_with_divergence(self):
+        cur = torch.tensor([-0.5, -0.5])
+        near, far = torch.tensor([-0.6, -0.6]), torch.tensor([-3.0, -3.0])
+        assert (_kl_to_ref(cur, far) >= 0).all() and (_kl_to_ref(cur, near) >= 0).all()
+        assert _kl_to_ref(cur, far).mean() > _kl_to_ref(cur, near).mean()
