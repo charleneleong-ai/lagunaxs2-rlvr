@@ -12,11 +12,18 @@ from collections.abc import Callable
 
 from torch.utils.data import Dataset
 
+from laguna_rlvr.visual.data import SyntheticOCR, random_words  # light (PIL only); heavy corpora stay lazy
+
 
 def _synthetic(n: int) -> Dataset:
-    from laguna_rlvr.visual.data import SyntheticOCR
-
     return SyntheticOCR(n=n)
+
+
+def _synthetic_words_lg(n: int) -> Dataset:
+    """Easiest reading rung: one big centered random 4-char string per image (each glyph spans several
+    patches). The curriculum-diagnostic floor — if the encoder-free path can't read THIS, the wall is
+    decoder grounding, not difficulty/resolution."""
+    return SyntheticOCR(texts=random_words(n or 256, seed=0), size=(384, 384), font_size=72, center=True)
 
 
 def _swebench_mm(n: int) -> Dataset:
@@ -129,6 +136,7 @@ _ALIGN_MIX = [("synthetic", 0.6), ("cauldron_rendered_text", 0.2), ("websight", 
 
 REGISTRY: dict[str, Callable[[int], Dataset]] = {
     "synthetic": _synthetic,
+    "synthetic_words_lg": _synthetic_words_lg,  # encoder-free reading-floor diagnostic (big single words)
     "swebench_mm": _swebench_mm,
     "websight": _websight,
     "webcode2m": _webcode2m,
