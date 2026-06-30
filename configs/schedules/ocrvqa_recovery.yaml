@@ -1,0 +1,43 @@
+# ocrvqa-recovery sweep — undo the tool-loop GSPO regression where the policy dropped the `ocr` tool call
+# globally (ocr-call rate 0% on every corpus) and collapsed ocrvqa to a memorized constant (0.275 -> 0.025).
+# Root cause (probe + code): the only pro-ocr signal on a transcription item that never solves is the small
+# tool bonus, and cross-batch advantage normalization (dominated by ±1.0 solve swings from reasoning corpora)
+# shrinks it to noise, while the DifficultySampler abandons ocrvqa once its solve-EMA collapses. Each variant
+# below targets one mechanism; ranked by held-out solve-rate with an OCRVQA FLOOR guard (verdict = overall
+# >= 0.171 AND ocrvqa recovers toward >= 0.20 — net win must not come at ocrvqa's expense).
+#
+# This yaml is the single source of truth; scripts/ocrvqa_recovery_sweep.py reads it (trains every variant,
+# probes each checkpoint, ranks by the verdict above). Run fully detached:
+#   setsid nohup uv run python scripts/ocrvqa_recovery_sweep.py configs/schedules/ocrvqa_recovery.yaml \
+#     </dev/null >>logs/ocrvqa_recovery_$(date -u +%Y%m%dT%H%M%SZ).log 2>&1 & disown
+# Faster directional screen: append `--steps 400`. All variants warm-start from the SFT adapter and share the
+# baseline's proven config (lr 1e-5, G=8, batch=2, difficulty sampling, 800 steps); only the named knob
+# differs (each variant is `{name, suffix, flags}` — `flags` are extra vision_tool_gspo CLI args).
+common_overrides:
+  init_ckpt: results/visual/glm_ocr__tool_sft/best.pt
+  base: poolside/Laguna-XS.2
+  steps: 800
+  lr: 1.0e-5
+  group_size: 8
+  batch: 2
+  difficulty: true
+  n_train: 40
+  eval_n: 40
+  wandb: false
+
+variants:
+  - name: baseline          # reproduce the regression under the clean (un-confounded) config
+    suffix: tool_gspo_base
+    flags: ""
+  - name: sampler-floor     # mechanism 2 — keep abandoned ocrvqa drawable (floor 0.05 -> 0.30, ~6x weight)
+    suffix: tool_gspo_floor
+    flags: "--sampler-floor 0.30"
+  - name: corpus-norm       # mechanism 1 — centre advantage on a running per-corpus baseline, not the
+    suffix: tool_gspo_corpusnorm   # solve-inflated global mean, so an unsolved ocr-call stays positive in-corpus
+    flags: "--corpus-norm"
+  - name: tool-bump         # mechanism 1 — widen the standalone pro-ocr reward (0.1 -> 0.4)
+    suffix: tool_gspo_toolbump
+    flags: "--tool-bonus 0.4"
+  - name: kl-anchor         # blunt anti-collapse leash to the SFT reference (small beta — too large also
+    suffix: tool_gspo_kl    # undoes the good drift); doubles per-step forward cost (a reference pass/rollout)
+    flags: "--kl-coef 0.02"
